@@ -1,0 +1,41 @@
+Metric ID,Langfuse score name,Rubric prompt (paste into Langfuse LLM-as-a-judge evaluator; model gpt-4o; output 0-1)
+M1,m1_extraction_completeness,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: List every item in EXPECTED 'must contain' (requirements, constraints, stakeholders, deadlines, dependencies, acceptance criteria). For each, check it is present in SYSTEM OUTPUT with the same meaning; numbers, units and versions must match exactly (e.g. '200ms' not '0.2s', '10,000' not '10K+'). Score = items present / items expected. Any rounded or altered number counts as missing.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M2,m2_ambiguity_flag_accuracy,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: Check (a) input_status matches EXPECTED (INSUFFICIENT when no requirement is stated), (b) every ambiguous item and contradiction in EXPECTED is flagged, (c) no specific requirement was invented for vague input. Score = correct checks / total checks; if (c) fails, score = 0.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M3,m3_groundedness,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: Enumerate every requirement, NFR, acceptance criterion, persona, date and dependency in the PRD (SYSTEM OUTPUT). For each, decide if it is traceable to the INPUT (approved requirements). Score = traceable items / total items. Template guidance text and 'Not stated in source' placeholders are not counted as items.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M5,m5_story_format_persona,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: For each story, check: 'As a [user], I want [capability], so that [benefit]' form; a priority of Must Have, Should Have or Nice to Have. Then check each persona named in EXPECTED has its own stories (not merged into a generic 'user'). Score = compliant stories / total stories, multiplied by (personas covered / personas expected).
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M6,m6_ac_fidelity,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: For each acceptance criterion attached to a story, check it traces to a criterion stated in the INPUT. Any criterion that adds a condition not stated is 'added'. Score = faithful criteria / total criteria; if any criterion is added, score = min(score, 0.5).
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M7,m7_gap_relevance,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: For each clarification question, decide if it targets a gap actually evidenced in the INPUT (cites or clearly refers to it) or is generic (could apply to any project). Score = specific questions / total questions.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M8,m8_gap_recall,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: List every missing item, contradiction and risk in EXPECTED. Check whether the SYSTEM OUTPUT surfaces each (as a gap, question, contradiction or risk). Score = surfaced / expected.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
+M9,m9_underspecified_flag,"You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}
+SYSTEM OUTPUT: {{output}}
+EXPECTED (ground truth): {{expected_output}}
+TASK: For each story, compare the underspecified flag with EXPECTED. A story is underspecified when information needed to build or size it is missing in the INPUT (e.g. unknown dependency ETA, undefined term). Score = correct flags / stories.
+Return JSON only: {""score"": <0.0-1.0>, ""reasoning"": ""<one or two sentences naming what was missing or invented>""}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge."
