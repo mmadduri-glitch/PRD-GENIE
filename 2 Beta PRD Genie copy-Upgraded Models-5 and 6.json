@@ -1,0 +1,3161 @@
+{
+  "name": "PRD Genie copy-Upgraded Models-5 and 6",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Hi there! 👋\nI am PRD Genie. I create PRDs and Epics and Stories in JIRA.You can use following\n\n-Meeting Notes/Transcripts\n-Product Briefs\n-Stake Holder Notes\n",
+        "options": {
+          "allowFileUploads": true,
+          "responseMode": "responseNodes"
+        }
+      },
+      "id": "80b5d275-7398-461b-8227-7d043ef1613f",
+      "name": "PM Chat (file upload)",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        -1520,
+        -2208
+      ],
+      "webhookId": "1fff78b2-7a6a-4af8-b211-3a16b7f9926d"
+    },
+    {
+      "parameters": {
+        "jsCode": "const first = $input.first();\nconst j = first.json || {};\nconst text = (j.chatInput || '').toString();\nconst bin = first.binary || {};\nconst sources = [];\nif (text.trim()) sources.push({ name: 'chat', text: text });\nfor (const k of Object.keys(bin)) {\n  const buf = await this.helpers.getBinaryDataBuffer(0, k);\n  sources.push({ name: bin[k].fileName || k, text: buf.toString('utf8') });\n}\nfunction clean(t){ return t.replace(/\\r/g,'').replace(/[ \\t]+\\n/g,'\\n').replace(/\\n{3,}/g,'\\n\\n').trim(); }\nconst chunks = [];\nfor (const s of sources) {\n  const body = clean(s.text);\n  const parts = body.split(/^=== ?TRANSCRIPT.*$/m).map(clean).filter(Boolean);\n  const list = parts.length ? parts : [body];\n  list.forEach(function(p, idx){\n    const meeting = (p.match(/^Meeting:\\s*(.+)$/mi) || [])[1] || null;\n    const date = (p.match(/^Date:\\s*(.+)$/mi) || [])[1] || null;\n    const attendees = (p.match(/^Attendees:\\s*(.+)$/mi) || [])[1] || null;\n    const speakers = Array.from(new Set((p.match(/^[A-Z][A-Za-z .'-]{1,30}(?=:\\s)/gm) || []).filter(function(x){ return !/^(Meeting|Date|Attendees)$/i.test(x); })));\n    chunks.push({ file: s.name, index: idx + 1, meeting: meeting, date: date, attendees: attendees, speakers: speakers, text: p });\n  });\n}\nconst normalized = chunks.map(function(c){ return '### SOURCE: ' + c.file + ' (part ' + c.index + ')\\n' + c.text; }).join('\\n\\n');\nreturn [{ json: { sources: sources, chunks: chunks, fileCount: Object.keys(bin).length, userText: text, normalized_text: normalized } }];"
+      },
+      "id": "f8f79026-949f-4f9b-9e27-a073ce45b07a",
+      "name": "C1 Ingest and Normalise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        -2480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst t = j.normalized_text || '';\nconst compare = j.fileCount >= 2 || /\\bcompare\\b/i.test(j.userText || '');\nconst speakerLines = (t.match(/^[A-Z][A-Za-z .'-]{1,30}:\\s+\\S/gm) || []).length;\nlet type = 'notes';\nif (/^Attendees:/mi.test(t) || speakerLines >= 3) type = 'transcript';\nelse if (/Product Brief/i.test(t) || /KEY REQUIREMENTS/i.test(t)) type = 'brief';\nelse if (/Interview/i.test(t) || /^\\s*[-*\\u2022]\\s+/m.test(t)) type = 'notes';\nreturn [{ json: Object.assign({}, j, { route: compare ? 'compare' : 'main', input_type: type }) }];"
+      },
+      "id": "6f5a9284-9a1c-4959-91f5-25ff274c7b35",
+      "name": "C2 Input Router",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        -2480
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=input_type: {{ $json.input_type }}\n\nSOURCES:\n{{ $json.normalized_text || \"(empty input)\" }}",
+        "options": {
+          "systemMessage": "ROLE: You are a requirements analyst extracting requirements from NeuronForge meeting inputs (transcripts, briefs, stakeholder notes).\nINPUT: an input_type hint and the normalised source text (each source labelled with its file name).\nOUTPUT: Return EXACTLY one JSON object (no markdown fences, no commentary) with these fields:\n{\"input_status\":\"OK\"|\"INSUFFICIENT\",\"stated_requirements\":[{\"id\":\"R1\",\"type\":\"FR\"|\"NFR\"|\"constraint\",\"text\":\"...\",\"source_quote\":\"exact copy from input\",\"verbatim_values\":[\"numbers/versions/units exactly as written\"]}],\"acceptance_criteria\":[{\"for\":\"R1\",\"text\":\"verbatim\",\"source_quote\":\"...\"}],\"ambiguous_items\":[{\"text\":\"...\",\"why\":\"...\",\"source_quote\":\"...\"}],\"contradictions\":[{\"a\":\"...\",\"b\":\"...\",\"said_by\":\"...\",\"source_quote_a\":\"...\",\"source_quote_b\":\"...\"}],\"stakeholders\":[{\"name\":\"...\",\"role\":\"...\",\"viewpoint\":\"...\"}],\"deadlines\":[{\"text\":\"...\",\"source_quote\":\"...\"}],\"dependencies\":[{\"text\":\"...\",\"source_quote\":\"...\"}],\"missing_info\":[\"...\"]}\nRULES: 1) Only extract what is explicitly stated; do NOT invent requirements, owners, dates or numbers. 2) Copy numbers, versions and acceptance criteria verbatim (e.g. 200ms p95, v52, 10K users); never round. 3) Every item needs a source_quote copied exactly from the input. 4) If two statements conflict, list both under contradictions with who said them; do NOT pick one or resolve it. 5) Capture every stakeholder viewpoint separately; do not favour any. 6) Classify performance, scale and integration-version statements as NFR.\nVAGUE-INPUT RULE: If a detail (owner, ETA, budget, metric, format, users) is not stated, write UNKNOWN and add it to missing_info. If no requirement is stated, set input_status = \"INSUFFICIENT\" and return an empty stated_requirements array. Never fill gaps.",
+          "enableStreaming": false
+        }
+      },
+      "id": "8aefb4c8-f1ff-4360-8c4b-abe0e8cd7ef0",
+      "name": "A1 Requirement Extractor",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -768,
+        -2608
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "9029b06e-f638-4dcb-97d2-fa94bf9d3a0e",
+      "name": "A1 Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -752,
+        -2352
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseJson(raw){ var t=(raw||'').toString().replace(/^\\s*```(?:json)?\\s*/i,'').replace(/```\\s*$/,'').trim(); return JSON.parse(t); }\nconst src = $('C2 Input Router').first().json;\nconst raw = ($json.output || '').toString();\nlet ex = null; let parseError = null;\ntry { ex = parseJson(raw); } catch (e) { parseError = 'Extractor did not return valid JSON: ' + e.message; }\nif (!ex || typeof ex !== 'object') ex = {};\n['stated_requirements','acceptance_criteria','ambiguous_items','contradictions','stakeholders','deadlines','dependencies','missing_info'].forEach(function(k){ if (!Array.isArray(ex[k])) ex[k] = []; });\nif (typeof ex.input_status !== 'string') ex.input_status = ex.stated_requirements.length ? 'OK' : 'INSUFFICIENT';\nif (parseError) ex.input_status = 'INSUFFICIENT';\nconst norm = function(s){ return (s || '').toString().replace(/\\s+/g, ' ').trim(); };\nconst hay = norm(src.normalized_text);\nconst flags = [];\nex.stated_requirements.forEach(function(r, i){\n  if (!r.id) r.id = 'R' + (i + 1);\n  const q = norm(r.source_quote);\n  r.quote_verified = q.length > 0 && hay.indexOf(q) !== -1;\n  if (!r.quote_verified) flags.push(r.id + ': source_quote not found verbatim in source');\n  (Array.isArray(r.verbatim_values) ? r.verbatim_values : []).forEach(function(v){\n    if (hay.indexOf(norm(v)) === -1) flags.push(r.id + ': value \"' + v + '\" not found verbatim in source');\n  });\n});\nex.acceptance_criteria.forEach(function(a){\n  if (hay.indexOf(norm(a.text)) === -1 && hay.indexOf(norm(a.source_quote)) === -1) flags.push('AC for ' + a.for + ': text not verbatim in source');\n});\nconst count = ex.stated_requirements.length;\nconst L = [];\nL.push('GATE 1 - Requirements review (input type: ' + src.input_type + ')');\nL.push('');\nL.push('Stated requirements (' + count + '):');\nex.stated_requirements.forEach(function(r){ L.push('- ' + r.id + ' [' + (r.type || '?') + '] ' + r.text + '  <<' + r.source_quote + '>>' + (r.quote_verified ? '' : '  [RED FLAG: unverified]')); });\nif (ex.acceptance_criteria.length) { L.push(''); L.push('Acceptance criteria:'); ex.acceptance_criteria.forEach(function(a){ L.push('- (' + a.for + ') ' + a.text); }); }\nif (ex.ambiguous_items.length) { L.push(''); L.push('Ambiguous items:'); ex.ambiguous_items.forEach(function(a){ L.push('- ' + a.text + ' - ' + a.why); }); }\nif (ex.contradictions.length) { L.push(''); L.push('Contradictions (unresolved):'); ex.contradictions.forEach(function(c){ L.push('- ' + c.a + '  VS  ' + c.b + (c.said_by ? ' (' + c.said_by + ')' : '')); }); }\nif (ex.stakeholders.length) { L.push(''); L.push('Stakeholders:'); ex.stakeholders.forEach(function(s){ L.push('- ' + s.name + (s.role ? ' (' + s.role + ')' : '') + ': ' + s.viewpoint); }); }\nif (ex.deadlines.length) { L.push(''); L.push('Deadlines: ' + ex.deadlines.map(function(d){ return d.text; }).join('; ')); }\nif (ex.dependencies.length) { L.push('Dependencies: ' + ex.dependencies.map(function(d){ return d.text; }).join('; ')); }\nif (ex.missing_info.length) { L.push('Missing info: ' + ex.missing_info.join('; ')); }\nif (flags.length) { L.push(''); L.push('C4 red flags:'); flags.forEach(function(f){ L.push('- ' + f); }); }\nL.push('');\nL.push('Reply \"approve\" to continue, or reply with your edits / deletions / answers (they will be applied as approved requirements notes).');\nreturn [{ json: { extraction: ex, flags: flags, count: count, status: ex.input_status, parse_error: parseError, gate1_message: L.join('\\n'), a1_done_at: Date.now() } }];"
+      },
+      "id": "b82774f7-e0de-444a-b968-7493c0452849",
+      "name": "C4 Verify and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        -2608
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "suff",
+              "leftValue": "={{ $json.count > 0 && $json.status !== 'INSUFFICIENT' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00d67a67-ec30-4b20-9975-296a7598a182",
+      "name": "C3 Sufficiency Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        160,
+        -2624
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "checkIfEvaluating"
+      },
+      "id": "95abb5bd-36ab-4e7c-8833-4d85c666debf",
+      "name": "Eval Run? Skip Gate 1",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        -1936,
+        -3024
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=MODE: short-circuit (insufficient input)\nEXTRACTION:\n{{ JSON.stringify($json.extraction) }}\n\nSOURCE TEXT:\n{{ $(\"C2 Input Router\").first().json.normalized_text || \"(empty input)\" }}",
+        "options": {
+          "systemMessage": "ROLE: You are a requirements gap analyst for NeuronForge PM/TPMs.\nINPUT: the extraction JSON (and, in full mode, the PRD and stories) plus the original source text.\nOUTPUT: Return EXACTLY one JSON object (no fences): {\"gaps\":[{\"area\":\"...\",\"missing\":\"...\",\"evidence_quote\":\"quote from input or 'none - input empty/vague'\",\"question\":\"...\",\"addressed_to\":\"...\"}],\"contradictions_to_resolve\":[\"...\"],\"risks\":[{\"risk\":\"...\",\"evidence\":\"...\"}],\"what_to_provide\":\"...\"}\nRULES: 1) Every gap cites the input that shows it. 2) Questions must be specific to THIS input. 3) Never answer your own questions and never invent requirements, metrics, owners or dates. 4) Unknown owner/ETA/budget is a risk.\nVAGUE-INPUT RULE: If the input is empty, return a single gap \"no requirements extractable\" and put what the PM should provide in what_to_provide.",
+          "enableStreaming": false
+        }
+      },
+      "id": "58446a46-b985-434c-a539-f43528755e03",
+      "name": "A4 Gap Analyzer (short-circuit)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1936,
+        -2592
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "ce9bcb1a-2535-4166-9f82-cacc3c469f37",
+      "name": "A4 Short Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2016,
+        -2368
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseJson(raw){ var t=(raw||'').toString().replace(/^\\s*```(?:json)?\\s*/i,'').replace(/```\\s*$/,'').trim(); return JSON.parse(t); }\nlet g = null;\ntry { g = parseJson($json.output); } catch (e) { g = null; }\nconst L = ['No PRD was generated: the input does not contain enough stated requirements (nothing was invented).'];\nif (g) {\n  (g.gaps || []).forEach(function(x){ L.push('- Missing: ' + x.missing + (x.question ? ' | Question: ' + x.question : '')); });\n  if (g.what_to_provide) L.push('', 'Please provide: ' + g.what_to_provide);\n  (g.risks || []).forEach(function(r){ L.push('Risk: ' + r.risk); });\n} else { L.push('Please provide a transcript, brief or notes that state concrete requirements.'); }\nreturn [{ json: { message: L.join('\\n') } }];"
+      },
+      "id": "6e9de296-d022-49ba-83f3-a9cd34e56d0b",
+      "name": "Format Insufficient Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2288,
+        -2592
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "checkIfEvaluating"
+      },
+      "id": "dd2a3172-d5a1-44c4-9615-b0992963463f",
+      "name": "Eval Run? Skip Reply",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        2512,
+        -2400
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ap",
+              "name": "text",
+              "value": "approve",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cdec0030-5909-4fb6-bb8f-7e95060ecb7e",
+      "name": "Auto-Approve Gate 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1216,
+        -2784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('C4 Verify and Validate').first().json;\nconst j = $json || {};\nlet reply = '';\nif (j.data && typeof j.data === 'object' && j.data.text !== undefined) reply = String(j.data.text);\nelse if (j.text !== undefined) reply = String(j.text);\nelse if (j.chatInput !== undefined) reply = String(j.chatInput);\nelse reply = JSON.stringify(j);\nconst approved = /^\\s*(approve|approved|yes|ok|lgtm)\\b/i.test(reply);\nreturn [{ json: { approved_requirements: v.extraction, pm_notes: approved ? '' : reply, gate1_decision: approved ? 'approved' : 'edited', flags: v.flags } }];"
+      },
+      "id": "924f2534-7762-420b-8937-bc30ae3150bf",
+      "name": "Apply Gate 1 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=APPROVED REQUIREMENTS:\n{{ JSON.stringify($json.approved_requirements) }}\n\nPM NOTES / EDITS:\n{{ $json.pm_notes || \"(none - approved as is)\" }}",
+        "options": {
+          "systemMessage": "ROLE: You are a PRD writer filling the NeuronForge company PRD template.\nINPUT: approved_requirements JSON (Gate-1 approved) and PM notes/edits.\nTEMPLATE SECTIONS (use exactly these keys, in this order): 1 Product Overview, 2 Goals and Objectives, 3 User Personas, 4 Feature Requirements (functional and non_functional tables with Priority and Source), 5 Acceptance Criteria, 6 Out of Scope, 7 Dependencies, 8 Assumptions, 9 Open Questions, 10 Timeline. The template defines structure and style ONLY.\nOUTPUT: Return EXACTLY one JSON object (no fences): {\"prd\":{\"Product Overview\":{\"product_name\":\"...\",\"summary\":\"...\",\"status\":\"Draft\"},\"Goals and Objectives\":[...strings],\"User Personas\":[{\"persona\":\"...\",\"description\":\"...\"}],\"Feature Requirements\":{\"functional\":[{\"id\":\"FR1\",\"requirement\":\"...\",\"priority\":\"Must Have|Should Have|Nice to Have\",\"source\":\"R1\"}],\"non_functional\":[{\"id\":\"NFR1\",\"requirement\":\"...\",\"priority\":\"...\",\"source\":\"R2\"}]},\"Acceptance Criteria\":[{\"for\":\"R1\",\"criteria\":\"verbatim\"}],\"Out of Scope\":[...],\"Dependencies\":[...],\"Assumptions\":[...],\"Open Questions\":[...],\"Timeline\":[...]}}\nRULES: 1) Use ONLY approved requirements and PM notes; never invent requirements. 2) Every FR/NFR row has a Source (requirement ID). 3) Contradictions, ambiguous items and unknowns go to Open Questions. 4) Keep Status = Draft. 5) Copy numbers and acceptance criteria verbatim.\nVAGUE-INPUT RULE: A section with no source content must be the string \"Not stated in source - see Open Questions\"; never write filler.",
+          "enableStreaming": false
+        }
+      },
+      "id": "531b191b-dfb3-451b-8e62-90a19c71a7ed",
+      "name": "A2 PRD Generator",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -768,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "fe645d82-7825-4d73-a214-813a94e0ba82",
+      "name": "A2 Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -768,
+        -1760
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "documentURL": "https://drive.google.com/file/d/1HFbyt1ii_OhYlV2KOhmhdt1TFdu33dFN/view?usp=drive_link"
+      },
+      "id": "8c02cd60-bed0-4da0-9af8-4855f1e46abd",
+      "name": "Get a document in Google Docs",
+      "type": "n8n-nodes-base.googleDocsTool",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        -1808
+      ],
+      "credentials": {
+        "googleDocsOAuth2Api": {
+          "id": "Vm8lGeBBBN0AWw0N",
+          "name": "Google Docs account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseJson(raw){ var t=(raw||'').toString().replace(/^\\s*```(?:json)?\\s*/i,'').replace(/```\\s*$/,'').trim(); return JSON.parse(t); }\nconst ORDER = ['Product Overview','Goals and Objectives','User Personas','Feature Requirements','Acceptance Criteria','Out of Scope','Dependencies','Assumptions','Open Questions','Timeline'];\nlet prd = null; let err = null;\ntry { const p = parseJson($json.output); prd = p.prd || p; } catch (e) { err = 'PRD Generator returned invalid JSON: ' + e.message; }\nif (!prd || typeof prd !== 'object') prd = {};\nconst keys = Object.keys(prd);\nconst missing = ORDER.filter(function(k){ return keys.indexOf(k) === -1; });\nconst present = keys.filter(function(k){ return ORDER.indexOf(k) !== -1; });\nconst inOrder = present.join('|') === ORDER.filter(function(k){ return present.indexOf(k) !== -1; }).join('|');\nconst fr = (prd['Feature Requirements'] || {});\nconst rows = [].concat(Array.isArray(fr.functional) ? fr.functional : [], Array.isArray(fr.non_functional) ? fr.non_functional : []);\nconst noSource = rows.filter(function(r){ return !r.source; }).map(function(r){ return r.id || r.requirement; });\nconst ordered = {};\nORDER.forEach(function(k){ ordered[k] = prd[k] !== undefined ? prd[k] : 'Not stated in source - see Open Questions'; });\nreturn [{ json: { prd: ordered, compliance: { ok: !err && missing.length === 0 && inOrder && noSource.length === 0, missing_sections: missing, in_order: inOrder, rows_without_source: noSource, parse_error: err } } }];"
+      },
+      "id": "d2ab6374-f263-452a-ba61-b98c61b2a66d",
+      "name": "C6 Template Compliance Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=TODAY: {{ $now.toFormat('yyyy-MM-dd') }}\nSTATED DEADLINES (from approved requirements):\n{{ JSON.stringify(($('Apply Gate 1 Decision').first().json.approved_requirements || {}).deadlines || []) }}\n\nPRD:\n{{ JSON.stringify($json.prd) }}",
+        "options": {
+          "systemMessage": "ROLE: You are an agile analyst converting a PRD into Epics and User Stories.\nINPUT: the PRD JSON.\nOUTPUT: Return EXACTLY one JSON object (no fences): {\"epics\":[{\"name\":\"...\",\"summary\":\"...\",\"description\":\"...\",\"priority\":\"Must Have|Should Have|Nice to Have\",\"due_date\":\"YYYY-MM-DD or empty\"}],\"stories\":[{\"epic\":\"epic name\",\"feature\":\"...\",\"persona\":\"...\",\"story\":\"As a [user], I want [capability], so that [benefit]\",\"acceptance_criteria\":[\"1. Given ... When ... Then ...\"],\"priority\":\"Must Have|Should Have|Nice to Have\",\"depends_on\":[\"...\"],\"source_req_ids\":[\"R1\"],\"due_date\":\"YYYY-MM-DD or empty\"}]}\nRULES: 1) Write separate stories per persona. 2) Acceptance criteria come from the PRD verbatim; add none. 3) Carry dependencies into depends_on. 4) Never invent features not in the PRD. 5) due_date: only from STATED DEADLINES or a date/timeline stated in the PRD that applies to that epic/story (or to the whole release). Convert it to an absolute YYYY-MM-DD date using TODAY (e.g. \"end of Q3\" -> last day of Q3, \"in 6 weeks\" -> TODAY + 42 days, \"by March\" -> last day of March). If no deadline applies, use an empty string; never guess.\nVAGUE-INPUT RULE: If the benefit is not stated, write \"so that [benefit not stated - confirm]\".",
+          "enableStreaming": false
+        }
+      },
+      "id": "5d94f7a0-b79b-47d7-8377-1827f9679665",
+      "name": "A3 Story Breakdown",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -192,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "74cd6816-693f-4184-a92d-98e4a3d738c7",
+      "name": "A3 Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -192,
+        -1776
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseJson(raw){ var t=(raw||'').toString().replace(/^\\s*```(?:json)?\\s*/i,'').replace(/```\\s*$/,'').trim(); return JSON.parse(t); }\nlet s = { epics: [], stories: [] }; let err = null;\ntry { s = parseJson($json.output); } catch (e) { err = e.message; }\nconst epics = Array.isArray(s.epics) ? s.epics : [];\nconst stories = (Array.isArray(s.stories) ? s.stories : []).map(function(x, i){ return Object.assign({}, x, { story_id: 'S' + String(i + 1).padStart(3, '0') }); });\nconst c6 = $('C6 Template Compliance Check').first().json;\nreturn [{ json: { epics: epics, stories: stories, parse_error: err, prd: c6.prd, compliance: c6.compliance, a3_done_at: Date.now() } }];"
+      },
+      "id": "f2c11b2f-53f2-4e58-8efb-42f2d583b17f",
+      "name": "Parse Stories",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=MODE: full\nEXTRACTION:\n{{ JSON.stringify($(\"Apply Gate 1 Decision\").first().json.approved_requirements) }}\n\nPRD:\n{{ JSON.stringify($json.prd) }}\n\nSTORIES:\n{{ JSON.stringify($json.stories) }}",
+        "options": {
+          "systemMessage": "ROLE: You are a requirements gap analyst for NeuronForge PM/TPMs.\nINPUT: the extraction JSON (and, in full mode, the PRD and stories) plus the original source text.\nOUTPUT: Return EXACTLY one JSON object (no fences): {\"gaps\":[{\"area\":\"...\",\"missing\":\"...\",\"evidence_quote\":\"quote from input or 'none - input empty/vague'\",\"question\":\"...\",\"addressed_to\":\"...\"}],\"contradictions_to_resolve\":[\"...\"],\"risks\":[{\"risk\":\"...\",\"evidence\":\"...\"}],\"what_to_provide\":\"...\"}\nRULES: 1) Every gap cites the input that shows it. 2) Questions must be specific to THIS input. 3) Never answer your own questions and never invent requirements, metrics, owners or dates. 4) Unknown owner/ETA/budget is a risk.\nVAGUE-INPUT RULE: If the input is empty, return a single gap \"no requirements extractable\" and put what the PM should provide in what_to_provide.",
+          "enableStreaming": false
+        }
+      },
+      "id": "5a81370d-8998-4d53-bac0-de69dad8c7c1",
+      "name": "A4 Gap Analyzer (full)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        384,
+        -2304
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "c61d9478-72e4-4d27-bb9b-8c49d0b06eec",
+      "name": "A4 Full Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        368,
+        -2048
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=STORIES:\n{{ JSON.stringify($json.stories) }}",
+        "options": {
+          "systemMessage": "ROLE: You are a delivery lead giving T-shirt size estimates for user stories.\nINPUT: stories JSON, each with story_id.\nOUTPUT: Return EXACTLY one JSON object (no fences): {\"estimates\":[{\"story_id\":\"S001\",\"size\":\"S|M|L|XL\",\"complexity_signals\":[\"...\"],\"underspecified\":true|false,\"missing_detail\":\"...\"}]}\nRULES: 1) Size only from signals present in the story (integrations, NFR numbers, personas, dependencies); cite them. 2) Never silently be confident.\nVAGUE-INPUT RULE: If detail is missing, set underspecified = true and say what is missing; treat the size as provisional.",
+          "enableStreaming": false
+        }
+      },
+      "id": "e4de3d7d-a435-4441-b499-ddafec6bb03f",
+      "name": "A5 Scope Estimator",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        384,
+        -1792
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "message": "={{ $json.gate1_message }}",
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "resumeAmount": 24
+            }
+          }
+        }
+      },
+      "id": "5fa629fc-4e64-47d1-9490-bcddc73491e0",
+      "name": "Gate 1: Requirements Review",
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        -1216,
+        -2000
+      ],
+      "webhookId": "069ed208-bfc0-456c-9e55-a7428a4e7b65"
+    },
+    {
+      "parameters": {
+        "jsCode": "function pj(raw) {\n  try {\n    var t = String(raw || '').replace(/^\\s*```(?:json)?\\s*/i, '').replace(/```\\s*$/, '').trim();\n    return JSON.parse(t);\n  } catch (e) { return null; }\n}\nconst full = $('A5 Scope Estimator').isExecuted;\nconst tc = $('Evaluation Trigger').first().json;\nconst ei = $('Eval Input').first().json;\nconst c2 = $('C2 Input Router').first().json;\nconst c4 = $('C4 Verify and Validate').first().json;\nlet gaps; let est = null; let prd = null; let compliance = null; let epics = []; let stories = []; let approved = null; let a3Done = null;\nif (full) {\n  const st = $('Parse Stories').first().json;\n  const a4raw = $('A4 Gap Analyzer (full)').first().json.output;\n  const a5raw = $('A5 Scope Estimator').first().json.output;\n  gaps = pj(a4raw) || { parse_error: 'A4 output was not valid JSON', raw: String(a4raw || '').slice(0, 4000) };\n  est = pj(a5raw) || { estimates: [], parse_error: 'A5 output was not valid JSON', raw: String(a5raw || '').slice(0, 4000) };\n  approved = $('Apply Gate 1 Decision').first().json.approved_requirements;\n  prd = st.prd; compliance = st.compliance; epics = st.epics || []; stories = st.stories || [];\n  a3Done = Number(st.a3_done_at) || null;\n} else {\n  const a4raw = $('A4 Gap Analyzer (short-circuit)').first().json.output;\n  gaps = pj(a4raw) || { parse_error: 'A4 output was not valid JSON', raw: String(a4raw || '').slice(0, 4000) };\n}\nreturn [{ json: {\n  branch: full ? 'full' : 'short',\n  test: tc,\n  run_id: ei.run_id,\n  prompt_version: ei.prompt_version,\n  input_type: c2.input_type,\n  route: c2.route,\n  status: c4.status,\n  extraction: c4.extraction,\n  c4_flags: c4.flags || [],\n  approved_requirements: approved,\n  prd: prd,\n  compliance: compliance,\n  epics: epics,\n  stories: stories,\n  gaps: gaps,\n  estimates: est,\n  timings: { started: Number(ei.eval_started_at), a1_done: Number(c4.a1_done_at) || null, a3_done: a3Done, end: Date.now() }\n} }];\n"
+      },
+      "id": "8733a278-dd37-4c09-a157-8b345a939ca7",
+      "name": "Collect Pipeline Outputs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        -2624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst tc = r.test || {};\nconst HEAD = 'You are an impartial evaluator for PRD Genie, an AI assistant that turns meeting inputs into requirements, PRDs and user stories. INPUT: {{input}}\\nSYSTEM OUTPUT: {{output}}\\nEXPECTED (ground truth): {{expected_output}}\\nTASK: ';\nconst TAIL = '\\nReturn JSON only: {\"score\": <0.0-1.0>, \"reasoning\": \"<one or two sentences naming what was missing or invented>\"}. Do not reward length. Judge only against the INPUT and EXPECTED; do not use outside knowledge.';\nconst TASKS = {\"M1\": \"List every item in EXPECTED 'must contain' (requirements, constraints, stakeholders, deadlines, dependencies, acceptance criteria). For each, check it is present in SYSTEM OUTPUT with the same meaning; numbers, units and versions must match exactly (e.g. '200ms' not '0.2s', '10,000' not '10K+'). Score = items present / items expected. Any rounded or altered number counts as missing.\", \"M2\": \"Check (a) input_status matches EXPECTED (INSUFFICIENT when no requirement is stated), (b) every ambiguous item and contradiction in EXPECTED is flagged, (c) no specific requirement was invented for vague input. Score = correct checks / total checks; if (c) fails, score = 0.\", \"M3\": \"Enumerate every requirement, NFR, acceptance criterion, persona, date and dependency in the PRD (SYSTEM OUTPUT). For each, decide if it is traceable to the INPUT (approved requirements). Score = traceable items / total items. Template guidance text and 'Not stated in source' placeholders are not counted as items.\", \"M5\": \"For each story, check: 'As a [user], I want [capability], so that [benefit]' form; a priority of Must Have, Should Have or Nice to Have. Then check each persona named in EXPECTED has its own stories (not merged into a generic 'user'). Score = compliant stories / total stories, multiplied by (personas covered / personas expected).\", \"M6\": \"For each acceptance criterion attached to a story, check it traces to a criterion stated in the INPUT. Any criterion that adds a condition not stated is 'added'. Score = faithful criteria / total criteria; if any criterion is added, score = min(score, 0.5).\", \"M7\": \"For each clarification question, decide if it targets a gap actually evidenced in the INPUT (cites or clearly refers to it) or is generic (could apply to any project). Score = specific questions / total questions.\", \"M8\": \"List every missing item, contradiction and risk in EXPECTED. Check whether the SYSTEM OUTPUT surfaces each (as a gap, question, contradiction or risk). Score = surfaced / expected.\", \"M9\": \"For each story, compare the underspecified flag with EXPECTED. A story is underspecified when information needed to build or size it is missing in the INPUT (e.g. unknown dependency ETA, undefined term). Score = correct flags / stories.\"};\nconst NAMES = { M1: 'm1_extraction_completeness', M2: 'm2_ambiguity_flag_accuracy', M3: 'm3_groundedness', M4: 'm4_format_compliance', M5: 'm5_story_format_persona', M6: 'm6_ac_fidelity', M7: 'm7_gap_relevance', M8: 'm8_gap_recall', M9: 'm9_underspecified_flag' };\nconst AGENT = { M1: 'A1', M2: 'A1', M3: 'A2', M4: 'A2', M5: 'A3', M6: 'A3', M7: 'A4', M8: 'A4', M9: 'A5' };\nconst full = r.branch === 'full';\nconst MAX = 30000;\nfunction s(v) { const t = typeof v === 'string' ? v : JSON.stringify(v === undefined ? null : v); return t.length > MAX ? t.slice(0, MAX) + ' ...[truncated]' : t; }\n\n// Which metrics to score: those listed for the test, plus M3/M4 on every full run (per metric definitions)\nconst jobs = [];\nfunction add(m, expected, mustNot, extra) { if (NAMES[m] && !jobs.some(function (j) { return j.metric === m; })) jobs.push({ metric: m, expected: expected, must_not: mustNot, listed: !extra }); }\n(String(tc.metrics || '').match(/\\bM\\d+\\b/g) || []).forEach(function (m) { add(m, tc.expected_output, tc.must_not); });\n// T11 and T12 are chained from T1: score them on T1's PRD and stories\nif (String(tc.test_id) === 'T1') {\n  ['M3', 'M4'].forEach(function (m) { add(m, 'Follows template structure (10 sections). All sections present. Only T1 requirements.', 'Requirements not in T1.'); });\n  ['M5', 'M6', 'M9'].forEach(function (m) { add(m, \"Epics and User Stories in 'As a [user]' format with priority suggestions.\", 'Stories for requirements not in T11.'); });\n}\nif (full) { add('M3', tc.expected_output, tc.must_not); add('M4', tc.expected_output, tc.must_not); }\nif (!jobs.some(function (j) { return j.metric === 'M1' || j.metric === 'M2'; })) add('M2', tc.expected_output, tc.must_not, true);\n// Diagnostic coverage: score every agent that ran (not counted toward pass/fail)\nif (full) { ['M5', 'M6', 'M7', 'M9'].forEach(function (m) { add(m, tc.expected_output, tc.must_not, true); }); }\nelse { ['M7', 'M8'].forEach(function (m) { add(m, tc.expected_output, tc.must_not, true); }); }\n\nconst source = String(tc.input_text || '');\nconst fixed = [];\nconst items = [];\njobs.forEach(function (j) {\n  const needsFull = ['M3', 'M4', 'M5', 'M6', 'M9'].indexOf(j.metric) !== -1;\n  if (needsFull && !full) { fixed.push({ metric: j.metric, listed: j.listed, score: 0, reason: 'Stage not reached: input was short-circuited at C3, so ' + AGENT[j.metric] + ' never ran.' }); return; }\n  if (j.metric === 'M4') {\n    const c = r.compliance || {};\n    const missing = (c.missing_sections || []).length;\n    let v = (10 - missing) / 10;\n    if (c.in_order === false) v -= 0.1;\n    if ((c.rows_without_source || []).length) v -= 0.1;\n    if (c.parse_error) v = 0;\n    v = Math.max(0, Math.min(1, Math.round(v * 100) / 100));\n    fixed.push({ metric: 'M4', listed: j.listed, score: v, reason: 'C6 check: missing sections [' + (c.missing_sections || []).join(', ') + '], in order=' + c.in_order + ', rows without source=' + (c.rows_without_source || []).length + (c.parse_error ? ', ' + c.parse_error : '') });\n    return;\n  }\n  let input = source; let output = '';\n  if (j.metric === 'M1' || j.metric === 'M2') output = s(r.extraction);\n  else if (j.metric === 'M3') { input = 'APPROVED REQUIREMENTS: ' + s(r.approved_requirements) + '\\nSOURCE TEXT: ' + source; output = s(r.prd); }\n  else if (j.metric === 'M5') { input = 'PRD: ' + s(r.prd); output = s({ epics: r.epics, stories: r.stories }); }\n  else if (j.metric === 'M6') { input = 'PRD ACCEPTANCE CRITERIA: ' + s((r.prd || {})['Acceptance Criteria']) + '\\nSOURCE TEXT: ' + source; output = s((r.stories || []).map(function (x) { return { story_id: x.story_id, story: x.story, acceptance_criteria: x.acceptance_criteria }; })); }\n  else if (j.metric === 'M7' || j.metric === 'M8') output = s(r.gaps);\n  else if (j.metric === 'M9') { input = 'STORIES: ' + s(r.stories) + '\\nSOURCE TEXT: ' + source; output = s(r.estimates); }\n  const prompt = (HEAD + TASKS[j.metric] + TAIL)\n    .split('{{input}}').join(input)\n    .split('{{output}}').join(output)\n    .split('{{expected_output}}').join(String(j.expected || '') + '\\nMUST NOT: ' + String(j.must_not || ''));\n  items.push({ metric: j.metric, score_name: NAMES[j.metric], agent: AGENT[j.metric], listed: j.listed, prompt: prompt });\n});\n\nconst summary = [\n  'status=' + r.status,\n  'requirements=' + (((r.extraction || {}).stated_requirements) || []).length,\n  'prd=' + (r.prd ? 'yes' : 'no'),\n  'stories=' + (r.stories || []).length,\n  'gaps=' + (((r.gaps || {}).gaps) || []).length,\n  'estimates=' + (((r.estimates || {}).estimates) || []).length\n].join('; ');\nconst ctx = {\n  test_id: tc.test_id, category: tc.category, negative_case: tc.negative_case, expected_route: tc.expected_route,\n  run_id: r.run_id, prompt_version: r.prompt_version, branch: r.branch, status: r.status, input_type: r.input_type,\n  route: r.route, timings: r.timings, fixed: fixed, summary: summary, listed: jobs.filter(function (j) { return j.listed; }).map(function (j) { return j.metric; })\n};\nreturn items.map(function (it) { return { json: Object.assign({}, it, { ctx: ctx }) }; });\n"
+      },
+      "id": "7f68362d-4031-41aa-b28c-0a32d300124a",
+      "name": "Build Judge Prompts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1088,
+        -2816
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "batching": {}
+      },
+      "id": "dc84a475-4eed-4278-ba22-840ed4474cc0",
+      "name": "LLM Judge",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1312,
+        -2816
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "576bedc8-9199-49e2-a4b7-e0ced54ccb4e",
+      "name": "Judge Model (gpt-4o)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1392,
+        -2592
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "execution",
+        "operation": "get",
+        "executionId": "={{ $execution.id }}",
+        "options": {
+          "activeWorkflows": true
+        },
+        "requestOptions": {}
+      },
+      "id": "50e4f09c-aa93-4262-bb1c-4f9c6faad240",
+      "name": "Get Execution Usage",
+      "type": "n8n-nodes-base.n8n",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        -2416
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "n8nApi": {
+          "id": "amd9x118U3Gv7rWE",
+          "name": "n8n account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prompts = $('Build Judge Prompts').all();\nconst judged = $('LLM Judge').all();\nconst ctx = prompts[0].json.ctx;\nconst scores = {}; const reasons = {};\n(ctx.fixed || []).forEach(function (f) { scores[f.metric] = f.score; reasons[f.metric] = f.reason; });\njudged.forEach(function (it, i) {\n  const p = prompts[i] ? prompts[i].json : null;\n  if (!p) return;\n  let v = 0; let why = 'judge output could not be parsed';\n  try {\n    const t = String(it.json.text || '').replace(/^\\s*```(?:json)?\\s*/i, '').replace(/```\\s*$/, '').trim();\n    const o = JSON.parse(t);\n    v = Number(o.score); if (isNaN(v)) v = 0;\n    v = Math.max(0, Math.min(1, v));\n    why = String(o.reasoning || '');\n  } catch (e) {}\n  scores[p.metric] = v; reasons[p.metric] = why;\n});\n\n// Routing accuracy (C2 router + C3 gate) vs expected route\nconst exp = String(ctx.expected_route || '');\nconst expectShort = /short-circuit/i.test(exp);\nconst expectVC = /version comparison/i.test(exp);\nconst actualShort = ctx.branch === 'short';\nconst typeMatch = exp.match(/\\/\\s*(transcript|brief|notes)\\b/i);\nconst typeOk = !typeMatch || String(ctx.input_type || '').toLowerCase() === typeMatch[1].toLowerCase();\nconst routing = (!expectVC && expectShort === actualShort && typeOk && ctx.route === 'main') ? 1 : 0;\n\n// Pass thresholds from the metric definitions\nconst id = String(ctx.test_id);\nfunction threshold(m) {\n  if (m === 'M1') return ['T1', 'T4', 'T7'].indexOf(id) !== -1 ? 1 : 0.9;\n  if (m === 'M7' || m === 'M9') return 0.8;\n  if (m === 'M8') return ['T2', 'T3', 'T5', 'T10'].indexOf(id) !== -1 ? 1 : 0.9;\n  return 1;\n}\nconst failed = [];\nconst listed = ctx.listed || [];\nObject.keys(scores).forEach(function (m) { if (listed.indexOf(m) !== -1 && scores[m] < threshold(m)) failed.push(m + '=' + scores[m] + ' (needs ' + threshold(m) + ')'); });\nif (routing !== 1) failed.push('routing (expected \"' + exp + '\", got ' + (actualShort ? 'short-circuit' : 'full PRD pipeline') + ', input_type=' + ctx.input_type + ')');\n\nfunction avg(list) { const v = list.filter(function (m) { return typeof scores[m] === 'number'; }).map(function (m) { return scores[m]; }); return v.length ? Math.round(v.reduce(function (a, b) { return a + b; }, 0) / v.length * 1000) / 1000 : null; }\nconst allVals = Object.keys(scores).filter(function (m) { return listed.indexOf(m) !== -1; }).map(function (m) { return scores[m]; });\nconst metricAvg = allVals.length ? Math.round(allVals.reduce(function (a, b) { return a + b; }, 0) / allVals.length * 1000) / 1000 : 0;\nconst hallucination = (typeof scores.M3 === 'number' && scores.M3 < 1 && ctx.branch === 'full') || (typeof scores.M6 === 'number' && scores.M6 <= 0.5 && ctx.branch === 'full') || (typeof scores.M2 === 'number' && scores.M2 === 0);\nconst t = ctx.timings || {};\nfunction secs(a, b) { return (a && b) ? Math.round((b - a) / 100) / 10 : null; }\nfunction g(m) { return typeof scores[m] === 'number' ? scores[m] : null; }\nconst pass = failed.length === 0;\n\n// Langfuse: OTLP trace with one span per pipeline stage, plus one score per metric\nfunction hex(n) { let o = ''; for (let i = 0; i < n; i++) o += Math.floor(Math.random() * 16).toString(16); return o; }\nfunction ns(ms) { return String(Math.round(ms)) + '000000'; }\nfunction sv(v) { return { stringValue: String(v) }; }\nfunction attr(k, v) { return { key: k, value: sv(v) }; }\nconst traceId = hex(32); const rootId = hex(16);\nconst common = [\n  attr('langfuse.trace.name', 'prd-genie-eval-full'),\n  { key: 'langfuse.trace.tags', value: { arrayValue: { values: ['n8n-evaluation', 'prd-genie', 'full-pipeline', String(ctx.run_id || '')].map(sv) } } },\n  attr('langfuse.trace.metadata.test_id', ctx.test_id),\n  attr('langfuse.trace.metadata.category', ctx.category || ''),\n  attr('langfuse.trace.metadata.expected_route', exp),\n  attr('langfuse.trace.metadata.run_id', ctx.run_id || ''),\n  attr('langfuse.trace.metadata.prompt_version', ctx.prompt_version || ''),\n  attr('langfuse.trace.metadata.n8n_execution_id', $execution.id)\n];\nconst now = Date.now();\nfunction span(id, parent, name, s, e, extra) {\n  const o = { traceId: traceId, spanId: id, name: name, kind: 1, startTimeUnixNano: ns(s || now), endTimeUnixNano: ns(e || s || now), attributes: common.concat([attr('langfuse.observation.type', 'span')]).concat(extra || []), status: { code: 1 } };\n  if (parent) o.parentSpanId = parent;\n  return o;\n}\n// Full pipeline artefacts (eval runs table + Langfuse output)\nconst po = $('Collect Pipeline Outputs').first().json;\nfunction js(v) { return (v === null || v === undefined || (Array.isArray(v) && v.length === 0)) ? '' : JSON.stringify(v, null, 2); }\nconst outText = js(po.branch === 'full' ? { gaps: po.gaps, estimates: po.estimates } : { gaps: po.gaps, note: 'short-circuit: input insufficient' });\nconst prdText = js(po.prd);\nconst epicsText = js(po.epics);\nconst storiesText = js(po.stories);\nconst traceOutput = JSON.stringify({ output: po.branch === 'full' ? { gaps: po.gaps, estimates: po.estimates } : { gaps: po.gaps, note: 'short-circuit: input insufficient' }, prd_generated: po.prd || null, epics: po.epics || [], stories: po.stories || [] });\nconst spans = [span(rootId, null, 'prd-genie-eval ' + ctx.test_id, t.started, now, [attr('langfuse.trace.output', traceOutput), attr('langfuse.observation.output', traceOutput), attr('langfuse.trace.metadata.summary', ctx.summary || '')])];\nif (t.a1_done) spans.push(span(hex(16), rootId, 'A1 Requirement Extractor + C4', t.started, t.a1_done));\nif (t.a3_done) spans.push(span(hex(16), rootId, 'A2 PRD Generator + C6 + A3 Story Breakdown', t.a1_done, t.a3_done, [attr('langfuse.observation.output', JSON.stringify({ prd_generated: po.prd || null, epics: po.epics || [], stories: po.stories || [] }))]));\nspans.push(span(hex(16), rootId, actualShort ? 'A4 Gap Analyzer (short-circuit)' : 'A4 Gap Analyzer + A5 Scope Estimator', t.a3_done || t.a1_done, t.end, [attr('langfuse.observation.output', outText || '')]));\nspans.push(span(hex(16), rootId, 'LLM Judge', t.end, now));\n// Raw agent outputs (A1-A5) for the runs table and Langfuse\nfunction agentOut(n) { try { if (!$(n).isExecuted) return ''; const o = $(n).first().json.output; if (o === null || o === undefined) return ''; return typeof o === 'string' ? o : JSON.stringify(o, null, 2); } catch (e) { return ''; } }\nconst AGENT_NAMES = { A1: 'A1 Requirement Extractor', A2: 'A2 PRD Generator', A3: 'A3 Story Breakdown', A4: actualShort ? 'A4 Gap Analyzer (short-circuit)' : 'A4 Gap Analyzer (full)', A5: 'A5 Scope Estimator' };\nconst agentOutputs = {}; Object.keys(AGENT_NAMES).forEach(function (k) { agentOutputs[k] = agentOut(AGENT_NAMES[k]); });\nconst AGENT_TIMES = { A1: [t.started, t.a1_done], A2: [t.a1_done, t.a3_done], A3: [t.a1_done, t.a3_done], A4: [t.a3_done || t.a1_done, t.end], A5: [t.a3_done, t.end] };\nObject.keys(agentOutputs).forEach(function (k) {\n  if (!agentOutputs[k]) return;\n  spans.push(span(hex(16), rootId, AGENT_NAMES[k] + ' output', AGENT_TIMES[k][0], AGENT_TIMES[k][1], [attr('langfuse.observation.output', agentOutputs[k]), attr('langfuse.observation.metadata.agent', k)]));\n});\n// Cost: token usage n8n recorded for every model call in this execution (read back via the n8n API)\nconst PRICES = { 'gpt-4o-mini': { input: 0.15, output: 0.60 }, 'gpt-4o': { input: 2.50, output: 10.00 } }; // USD per 1M tokens, OpenAI standard list price\nconst MODEL_NODES = { 'A1 Model': 'A1', 'A4 Short Model': 'A4', 'A2 Model': 'A2', 'A3 Model': 'A3', 'A4 Full Model': 'A4', 'A5 Model': 'A5', 'Judge Model (gpt-4o)': 'Judge' };\nfunction priceKey(model, node) { const m = String(model || '').toLowerCase(); if (m.indexOf('gpt-4o-mini') === 0) return 'gpt-4o-mini'; if (m.indexOf('gpt-4o') === 0) return 'gpt-4o'; return node === 'Judge Model (gpt-4o)' ? 'gpt-4o' : 'gpt-4o-mini'; }\nfunction r6(v) { return Math.round(v * 1000000) / 1000000; }\nlet usageExec = null; try { usageExec = $('Get Execution Usage').first().json; } catch (e) {}\nlet ed = usageExec ? usageExec.data : null;\nif (typeof ed === 'string') { try { ed = JSON.parse(ed); } catch (e) { ed = null; } }\nconst runData = (ed && ed.resultData && ed.resultData.runData) || {};\nconst calls = [];\nObject.keys(MODEL_NODES).forEach(function (n) {\n  (runData[n] || []).forEach(function (r) {\n    const outs = (r && r.data && r.data.ai_languageModel) || [];\n    let u = null; let model = null;\n    outs.forEach(function (o) { (o || []).forEach(function (it) {\n      const j = (it && it.json) || {};\n      const tu = j.tokenUsage || j.tokenUsageEstimate;\n      if (tu) u = { input: Number(tu.promptTokens) || 0, output: Number(tu.completionTokens) || 0, estimated: !j.tokenUsage };\n      try { model = j.response.generations[0][0].generationInfo.model_name || model; } catch (e) {}\n    }); });\n    if (!u) return;\n    const pk = priceKey(model, n); const p = PRICES[pk];\n    calls.push({ node: n, agent: MODEL_NODES[n], model: model || pk, input: u.input, output: u.output, estimated: u.estimated, cost: r6((u.input * p.input + u.output * p.output) / 1000000), start: Number(r.startTime) || null, ms: Number(r.executionTime) || 0 });\n  });\n});\n// Fallback for A1-A5: estimate tokens from the prompt + output text (~4 chars per token, n8n's own estimate fallback) when no usage was recorded\nfunction prm(n) { try { return $(n).params || {}; } catch (e) { return {}; } }\nfunction itemOf(n) { try { return $(n).isExecuted ? ($(n).first().json || {}) : {}; } catch (e) { return {}; } }\nfunction jstr(v) { return JSON.stringify(v === undefined ? null : v); }\nfunction estTok(s) { return Math.ceil(String(s || '').length / 4); }\nconst AGENT_MODEL_NODE = { A1: 'A1 Model', A2: 'A2 Model', A3: 'A3 Model', A4: actualShort ? 'A4 Short Model' : 'A4 Full Model', A5: 'A5 Model' };\nconst NL = String.fromCharCode(10);\nfunction promptFor(k) {\n  const sys = String((prm(AGENT_NAMES[k]).options || {}).systemMessage || '');\n  const c2 = itemOf('C2 Input Router'); const g1 = itemOf('Apply Gate 1 Decision'); const ps = itemOf('Parse Stories');\n  let user = '';\n  if (k === 'A1') user = 'input_type: ' + c2.input_type + '' + NL + '' + NL + 'SOURCES:' + NL + '' + (c2.normalized_text || '(empty input)');\n  else if (k === 'A2') user = 'APPROVED REQUIREMENTS:' + NL + '' + jstr(g1.approved_requirements) + '' + NL + '' + NL + 'PM NOTES / EDITS:' + NL + '' + (g1.pm_notes || '(none - approved as is)');\n  else if (k === 'A3') user = 'TODAY: ' + $now.toFormat('yyyy-MM-dd') + '' + NL + 'STATED DEADLINES (from approved requirements):' + NL + '' + jstr((g1.approved_requirements || {}).deadlines || []) + '' + NL + '' + NL + 'PRD:' + NL + '' + jstr(itemOf('C6 Template Compliance Check').prd);\n  else if (k === 'A4' && actualShort) user = 'MODE: short-circuit (insufficient input)' + NL + 'EXTRACTION:' + NL + '' + jstr(itemOf('C4 Verify and Validate').extraction) + '' + NL + '' + NL + 'SOURCE TEXT:' + NL + '' + (c2.normalized_text || '(empty input)');\n  else if (k === 'A4') user = 'MODE: full' + NL + 'EXTRACTION:' + NL + '' + jstr(g1.approved_requirements) + '' + NL + '' + NL + 'PRD:' + NL + '' + jstr(ps.prd) + '' + NL + '' + NL + 'STORIES:' + NL + '' + jstr(ps.stories);\n  else if (k === 'A5') user = 'STORIES:' + NL + '' + jstr(ps.stories);\n  return 'System: ' + sys + '' + NL + 'Human: ' + user;\n}\nconst textEstimated = [];\n['A1', 'A2', 'A3', 'A4', 'A5'].forEach(function (k) {\n  if (!agentOutputs[k] || calls.some(function (c) { return c.agent === k; })) return;\n  const mNode = AGENT_MODEL_NODE[k];\n  const mParam = (prm(mNode).model || {}); const model = String((typeof mParam === 'object' ? mParam.value : mParam) || 'gpt-4o-mini');\n  const pk = priceKey(model, mNode); const p = PRICES[pk];\n  const input = estTok(promptFor(k)); const output = estTok(agentOutputs[k]);\n  const s0 = AGENT_TIMES[k][0] || null; const e0 = AGENT_TIMES[k][1] || null;\n  calls.push({ node: mNode, agent: k, model: model, input: input, output: output, estimated: true, source: 'text-estimate', cost: r6((input * p.input + output * p.output) / 1000000), start: s0, ms: (s0 && e0) ? Math.max(0, e0 - s0) : 0 });\n  textEstimated.push(k);\n});\nconst costAvailable = calls.length > 0;\nconst breakdown = {};\nlet pipelineCost = 0; let judgeCost = 0; let inTok = 0; let outTok = 0; let anyEstimated = false;\ncalls.forEach(function (c) {\n  const b = breakdown[c.agent] || (breakdown[c.agent] = { calls: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0, model: c.model });\n  b.calls++; b.input_tokens += c.input; b.output_tokens += c.output; b.cost_usd = r6(b.cost_usd + c.cost);\n  if (c.agent === 'Judge') judgeCost += c.cost; else pipelineCost += c.cost;\n  inTok += c.input; outTok += c.output; if (c.estimated) anyEstimated = true;\n});\npipelineCost = r6(pipelineCost); judgeCost = r6(judgeCost);\nconst totalCost = r6(pipelineCost + judgeCost);\nconst agentCost = {}; ['A1', 'A2', 'A3', 'A4', 'A5'].forEach(function (k) { agentCost[k] = !costAvailable ? null : (breakdown[k] ? breakdown[k].cost_usd : (agentOutputs[k] ? 0 : null)); });\nconst costNote = costAvailable ? ('list-price estimate; tokens ' + (anyEstimated ? 'estimated (provider returned no usage)' : 'reported by provider') + (textEstimated.length ? '; ' + textEstimated.join(', ') + ' estimated from prompt+output text (~4 chars/token)' : '') + (breakdown.Judge ? '' : '; judge cost not included (no recorded usage)')) : ('cost unavailable: ' + (usageExec && usageExec.error ? String(usageExec.error.message || usageExec.error).slice(0, 200) : 'no model usage found in execution data'));\nfunction iv(v) { return { intValue: String(Math.round(v)) }; }\nfunction dv(v) { return { doubleValue: v }; }\ncalls.forEach(function (c) {\n  const s = c.start || now; const e = s + c.ms;\n  spans.push({ traceId: traceId, spanId: hex(16), parentSpanId: rootId, name: c.agent + ' ' + c.node, kind: 1, startTimeUnixNano: ns(s), endTimeUnixNano: ns(e), status: { code: 1 }, attributes: common.concat([\n    attr('langfuse.observation.type', 'generation'),\n    attr('gen_ai.request.model', c.model), attr('gen_ai.response.model', c.model),\n    { key: 'gen_ai.usage.input_tokens', value: iv(c.input) },\n    { key: 'gen_ai.usage.output_tokens', value: iv(c.output) },\n    { key: 'gen_ai.usage.cost', value: dv(c.cost) },\n    attr('langfuse.observation.usage_details', JSON.stringify({ input: c.input, output: c.output, total: c.input + c.output })),\n    attr('langfuse.observation.cost_details', JSON.stringify({ total: c.cost })),\n    attr('langfuse.observation.metadata.token_source', c.source || 'n8n'),\n    attr('langfuse.observation.metadata.agent', c.agent),\n    attr('langfuse.observation.metadata.tokens_estimated', c.estimated)\n  ]) });\n});\nspans[0].attributes.push(attr('langfuse.trace.metadata.total_cost_usd', costAvailable ? totalCost : ''));\nspans[0].attributes.push(attr('langfuse.trace.metadata.pipeline_cost_usd', costAvailable ? pipelineCost : ''));\nspans[0].attributes.push(attr('langfuse.trace.metadata.judge_cost_usd', costAvailable ? judgeCost : ''));\nObject.keys(agentCost).forEach(function (k) { spans[0].attributes.push(attr('langfuse.trace.metadata.' + k.toLowerCase() + '_cost_usd', agentCost[k] === null ? '' : agentCost[k])); });\nconst otlp = { resourceSpans: [{ resource: { attributes: [attr('service.name', 'prd-genie-eval')] }, scopeSpans: [{ scope: { name: 'n8n-prd-genie-eval', version: '2' }, spans: spans }] }] };\nconst LF = { M1: 'm1_extraction_completeness', M2: 'm2_ambiguity_flag_accuracy', M3: 'm3_groundedness', M4: 'm4_format_compliance', M5: 'm5_story_format_persona', M6: 'm6_ac_fidelity', M7: 'm7_gap_relevance', M8: 'm8_gap_recall', M9: 'm9_underspecified_flag' };\nconst scoreRequests = [];\nfunction addScore(name, value, comment) { scoreRequests.push({ traceId: traceId, name: name, value: value, dataType: 'NUMERIC', comment: String(comment || '').slice(0, 1000) }); }\nObject.keys(scores).forEach(function (m) { addScore(LF[m] || m, scores[m], reasons[m]); });\naddScore('m12_routing_accuracy', routing, 'expected \"' + exp + '\", got ' + (actualShort ? 'short-circuit' : 'full') + ' / ' + ctx.input_type);\naddScore('e1_task_success', pass ? 1 : 0, failed.join('; ') || 'all checks passed');\naddScore('e2_latency_seconds', secs(t.started, t.end) || 0, 'pipeline latency, excludes judge');\nif (costAvailable) {\n  addScore('e3_cost_usd', totalCost, 'pipeline ' + pipelineCost + ' + judge ' + judgeCost + ' USD; ' + costNote);\n  addScore('e3_pipeline_cost_usd', pipelineCost, costNote);\n  addScore('e3_judge_cost_usd', judgeCost, costNote);\n  Object.keys(agentCost).forEach(function (k) { if (agentCost[k] !== null) addScore('e3_' + k.toLowerCase() + '_cost_usd', agentCost[k], AGENT_NAMES[k] + ': ' + (breakdown[k] ? breakdown[k].calls + ' call(s), ' + breakdown[k].input_tokens + ' in / ' + breakdown[k].output_tokens + ' out tokens, ' + breakdown[k].model : 'no model usage recorded')); });\n}\n\nreturn [{ json: {\n  test_id: ctx.test_id,\n  run_id: ctx.run_id,\n  prompt_version: ctx.prompt_version,\n  category: ctx.category,\n  negative_case: ctx.negative_case,\n  expected_route: exp,\n  actual_route: actualShort ? 'PRD pipeline -> C3 short-circuit' : 'PRD pipeline / ' + ctx.input_type,\n  actual_status: ctx.status,\n  input_type: ctx.input_type,\n  stages_reached: actualShort ? 'C1, C2, A1, C4, C3, A4 (short-circuit)' : 'C1, C2, A1, C4, C3, A2, C6, A3, A4, A5',\n  m1: g('M1'), m2: g('M2'), m3: g('M3'), m4: g('M4'), m5: g('M5'), m6: g('M6'), m7: g('M7'), m8: g('M8'), m9: g('M9'),\n  routing_accuracy: routing,\n  a1_score: avg(['M1', 'M2']),\n  a2_score: avg(['M3', 'M4']),\n  a3_score: avg(['M5', 'M6']),\n  a4_score: avg(['M7', 'M8']),\n  a5_score: avg(['M9']),\n  metric_avg: metricAvg,\n  hallucination_detected: hallucination ? 'Yes' : 'No',\n  hallucination_free: hallucination ? 0 : 1,\n  e1_pass: pass ? 'Pass' : 'Fail',\n  e1_task_success: pass ? 1 : 0,\n  failed_checks: failed.join('; '),\n  e2_latency_s: secs(t.started, t.end) || 0,\n  a1_latency_s: secs(t.started, t.a1_done),\n  a2_a3_latency_s: secs(t.a1_done, t.a3_done),\n  a4_a5_latency_s: secs(t.a3_done || t.a1_done, t.end),\n  total_cost_usd: costAvailable ? totalCost : null,\n  pipeline_cost_usd: costAvailable ? pipelineCost : null,\n  judge_cost_usd: costAvailable ? judgeCost : null,\n  input_tokens: costAvailable ? inTok : null,\n  output_tokens: costAvailable ? outTok : null,\n  cost_breakdown: JSON.stringify({ note: costNote, by_agent: breakdown }),\n  a1_cost_usd: agentCost.A1,\n  a2_cost_usd: agentCost.A2,\n  a3_cost_usd: agentCost.A3,\n  a4_cost_usd: agentCost.A4,\n  a5_cost_usd: agentCost.A5,\n  agent_cost_json: JSON.stringify({ A1: agentCost.A1, A2: agentCost.A2, A3: agentCost.A3, A4: agentCost.A4, A5: agentCost.A5, Judge: costAvailable ? judgeCost : null }),\n  scores_json: JSON.stringify(scores),\n  judge_reasoning: JSON.stringify(reasons),\n  output_summary: ctx.summary,\n  execution_id: String($execution.id),\n  output: outText,\n  prd_generated: prdText,\n  epics: epicsText,\n  stories: storiesText,\n  a1_output: agentOutputs.A1,\n  a2_output: agentOutputs.A2,\n  a3_output: agentOutputs.A3,\n  a4_output: agentOutputs.A4,\n  a5_output: agentOutputs.A5,\n  trace_id: traceId,\n  otlp_payload: otlp,\n  score_requests: scoreRequests\n} }];\n"
+      },
+      "id": "ffeb6e37-c5b9-42aa-97eb-076d220a6a99",
+      "name": "Compute Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        -2816
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "6rEQNKNVpQcCqgLu",
+          "cachedResultName": "prd_genie_eval_runs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "workflow_name": "={{ $workflow.name }}",
+            "test_id": "={{ $json.test_id }}",
+            "run_id": "={{ $json.run_id }}",
+            "prompt_version": "={{ $json.prompt_version }}",
+            "category": "={{ $json.category }}",
+            "negative_case": "={{ $json.negative_case }}",
+            "expected_route": "={{ $json.expected_route }}",
+            "actual_route": "={{ $json.actual_route }}",
+            "actual_status": "={{ $json.actual_status }}",
+            "input_type": "={{ $json.input_type }}",
+            "stages_reached": "={{ $json.stages_reached }}",
+            "m1": "={{ $json.m1 }}",
+            "m2": "={{ $json.m2 }}",
+            "m3": "={{ $json.m3 }}",
+            "m4": "={{ $json.m4 }}",
+            "m5": "={{ $json.m5 }}",
+            "m6": "={{ $json.m6 }}",
+            "m7": "={{ $json.m7 }}",
+            "m8": "={{ $json.m8 }}",
+            "m9": "={{ $json.m9 }}",
+            "routing_accuracy": "={{ $json.routing_accuracy }}",
+            "a1_score": "={{ $json.a1_score }}",
+            "a2_score": "={{ $json.a2_score }}",
+            "a3_score": "={{ $json.a3_score }}",
+            "a4_score": "={{ $json.a4_score }}",
+            "a5_score": "={{ $json.a5_score }}",
+            "metric_avg": "={{ $json.metric_avg }}",
+            "hallucination_detected": "={{ $json.hallucination_detected }}",
+            "e1_pass": "={{ $json.e1_pass }}",
+            "failed_checks": "={{ $json.failed_checks }}",
+            "e2_latency_s": "={{ $json.e2_latency_s }}",
+            "a1_latency_s": "={{ $json.a1_latency_s }}",
+            "a2_a3_latency_s": "={{ $json.a2_a3_latency_s }}",
+            "a4_a5_latency_s": "={{ $json.a4_a5_latency_s }}",
+            "judge_reasoning": "={{ $json.judge_reasoning }}",
+            "output_summary": "={{ $json.output_summary }}",
+            "execution_id": "={{ $json.execution_id }}",
+            "output": "={{ $json.output }}",
+            "prd_generated": "={{ $json.prd_generated }}",
+            "epics": "={{ $json.epics }}",
+            "stories": "={{ $json.stories }}",
+            "total_cost_usd": "={{ $json.total_cost_usd }}",
+            "pipeline_cost_usd": "={{ $json.pipeline_cost_usd }}",
+            "judge_cost_usd": "={{ $json.judge_cost_usd }}",
+            "input_tokens": "={{ $json.input_tokens }}",
+            "output_tokens": "={{ $json.output_tokens }}",
+            "cost_breakdown": "={{ $json.cost_breakdown }}",
+            "a1_output": "={{ $json.a1_output }}",
+            "a2_output": "={{ $json.a2_output }}",
+            "a3_output": "={{ $json.a3_output }}",
+            "a4_output": "={{ $json.a4_output }}",
+            "a5_output": "={{ $json.a5_output }}",
+            "a1_cost_usd": "={{ $json.a1_cost_usd }}",
+            "a2_cost_usd": "={{ $json.a2_cost_usd }}",
+            "a3_cost_usd": "={{ $json.a3_cost_usd }}",
+            "a4_cost_usd": "={{ $json.a4_cost_usd }}",
+            "a5_cost_usd": "={{ $json.a5_cost_usd }}"
+          },
+          "schema": [
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "test_id",
+              "displayName": "test_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prompt_version",
+              "displayName": "prompt_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "negative_case",
+              "displayName": "negative_case",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "expected_route",
+              "displayName": "expected_route",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "actual_route",
+              "displayName": "actual_route",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "actual_status",
+              "displayName": "actual_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "input_type",
+              "displayName": "input_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "stages_reached",
+              "displayName": "stages_reached",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m1",
+              "displayName": "m1",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m2",
+              "displayName": "m2",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m3",
+              "displayName": "m3",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m4",
+              "displayName": "m4",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m5",
+              "displayName": "m5",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m6",
+              "displayName": "m6",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m7",
+              "displayName": "m7",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m8",
+              "displayName": "m8",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "m9",
+              "displayName": "m9",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "routing_accuracy",
+              "displayName": "routing_accuracy",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a1_score",
+              "displayName": "a1_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a2_score",
+              "displayName": "a2_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a3_score",
+              "displayName": "a3_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a4_score",
+              "displayName": "a4_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a5_score",
+              "displayName": "a5_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "metric_avg",
+              "displayName": "metric_avg",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "hallucination_detected",
+              "displayName": "hallucination_detected",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "e1_pass",
+              "displayName": "e1_pass",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "failed_checks",
+              "displayName": "failed_checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "e2_latency_s",
+              "displayName": "e2_latency_s",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a1_latency_s",
+              "displayName": "a1_latency_s",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a2_a3_latency_s",
+              "displayName": "a2_a3_latency_s",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a4_a5_latency_s",
+              "displayName": "a4_a5_latency_s",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "judge_reasoning",
+              "displayName": "judge_reasoning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "output_summary",
+              "displayName": "output_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "output",
+              "displayName": "output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prd_generated",
+              "displayName": "prd_generated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "epics",
+              "displayName": "epics",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "stories",
+              "displayName": "stories",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_cost_usd",
+              "displayName": "total_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pipeline_cost_usd",
+              "displayName": "pipeline_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "judge_cost_usd",
+              "displayName": "judge_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "input_tokens",
+              "displayName": "input_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "output_tokens",
+              "displayName": "output_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cost_breakdown",
+              "displayName": "cost_breakdown",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a1_output",
+              "displayName": "a1_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a2_output",
+              "displayName": "a2_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a3_output",
+              "displayName": "a3_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a4_output",
+              "displayName": "a4_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a5_output",
+              "displayName": "a5_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a1_cost_usd",
+              "displayName": "a1_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a2_cost_usd",
+              "displayName": "a2_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a3_cost_usd",
+              "displayName": "a3_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a4_cost_usd",
+              "displayName": "a4_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "a5_cost_usd",
+              "displayName": "a5_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "efdfec4f-c830-49bb-b20e-5593f92ab3c5",
+      "name": "Log Run Results",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1728,
+        -2624
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://us.cloud.langfuse.com/api/public/otel/v1/traces",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "langfuseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-langfuse-ingestion-version",
+              "value": "4"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($(\"Compute Scores\").first().json.otlp_payload) }}",
+        "options": {}
+      },
+      "id": "bba8a3f4-de8b-40f6-8a6b-e6f6d020d3f7",
+      "name": "Send Trace to Langfuse",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1888,
+        -2624
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "langfuseApi": {
+          "id": "8G973H3IkWeDVkWX",
+          "name": "Langfuse account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "sr",
+              "name": "score_requests",
+              "value": "={{ $(\"Compute Scores\").first().json.score_requests }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d9e6e642-77da-4c84-9b77-fa97ae86275d",
+      "name": "Prepare Score Requests",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2112,
+        -2624
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "score_requests",
+        "options": {}
+      },
+      "id": "51167fb0-3418-43cd-a5a4-550bea641671",
+      "name": "Split Score Requests",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1.1,
+      "position": [
+        2336,
+        -2624
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://us.cloud.langfuse.com/api/public/scores",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "langfuseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "612b9cdc-286a-404a-9ef5-98165022a4b0",
+      "name": "Send Scores to Langfuse",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1888,
+        -2816
+      ],
+      "credentials": {
+        "langfuseApi": {
+          "id": "8G973H3IkWeDVkWX",
+          "name": "Langfuse account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "KXuXYkWUTVTT64Hq",
+          "cachedResultName": "prd_genie_eval_ground_truth"
+        },
+        "outputs": {
+          "values": [
+            {
+              "outputName": "actual_status",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.actual_status }}"
+            },
+            {
+              "outputName": "actual_route",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.actual_route }}"
+            },
+            {
+              "outputName": "scores_json",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.scores_json }}"
+            },
+            {
+              "outputName": "e1_pass",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.e1_pass }}"
+            },
+            {
+              "outputName": "judge_reasoning",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.judge_reasoning }}"
+            },
+            {
+              "outputName": "langfuse_trace_id",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.trace_id }}"
+            },
+            {
+              "outputName": "cost_usd",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.total_cost_usd }}"
+            },
+            {
+              "outputName": "agent_cost_usd",
+              "outputValue": "={{ $(\"Compute Scores\").first().json.agent_cost_json }}"
+            }
+          ]
+        }
+      },
+      "id": "009eafea-b6ce-4b6c-be74-555c13406108",
+      "name": "Record Eval Outputs",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        2112,
+        -2816
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fp",
+              "leftValue": "={{ $(\"Compute Scores\").first().json.a2_score !== null }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ec939061-67a8-4813-abc5-42f56c5d9fab",
+      "name": "Reached Full Pipeline?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3072,
+        -2624
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "setMetrics",
+        "metric": "customMetrics",
+        "metrics": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "e1_task_success",
+              "value": "={{ $(\"Compute Scores\").first().json.e1_task_success }}",
+              "type": "number"
+            },
+            {
+              "id": "e2",
+              "name": "e2_latency_seconds",
+              "value": "={{ $(\"Compute Scores\").first().json.e2_latency_s }}",
+              "type": "number"
+            },
+            {
+              "id": "rt",
+              "name": "m12_routing_accuracy",
+              "value": "={{ $(\"Compute Scores\").first().json.routing_accuracy }}",
+              "type": "number"
+            },
+            {
+              "id": "avg",
+              "name": "metric_avg",
+              "value": "={{ $(\"Compute Scores\").first().json.metric_avg }}",
+              "type": "number"
+            },
+            {
+              "id": "hf",
+              "name": "hallucination_free",
+              "value": "={{ $(\"Compute Scores\").first().json.hallucination_free }}",
+              "type": "number"
+            },
+            {
+              "id": "cost",
+              "name": "e3_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.total_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "a1",
+              "name": "a1_extractor_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a1_score }}",
+              "type": "number"
+            },
+            {
+              "id": "a4",
+              "name": "a4_gap_analyzer_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a4_score }}",
+              "type": "number"
+            },
+            {
+              "id": "a2",
+              "name": "a2_prd_generator_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a2_score }}",
+              "type": "number"
+            },
+            {
+              "id": "a3",
+              "name": "a3_story_breakdown_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a3_score }}",
+              "type": "number"
+            },
+            {
+              "id": "a5",
+              "name": "a5_scope_estimator_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a5_score }}",
+              "type": "number"
+            },
+            {
+              "id": "m3",
+              "name": "m3_groundedness",
+              "value": "={{ $(\"Compute Scores\").first().json.m3 }}",
+              "type": "number"
+            },
+            {
+              "id": "m4",
+              "name": "m4_format_compliance",
+              "value": "={{ $(\"Compute Scores\").first().json.m4 }}",
+              "type": "number"
+            },
+            {
+              "id": "c1",
+              "name": "a1_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a1_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "c2",
+              "name": "a2_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a2_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "c3",
+              "name": "a3_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a3_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "c4",
+              "name": "a4_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a4_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "c5",
+              "name": "a5_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a5_cost_usd ?? 0 }}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "ddd0f49c-ff2f-4dbe-b2d6-9d580d735448",
+      "name": "Set Metrics (full pipeline)",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        3296,
+        -2720
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "setMetrics",
+        "metric": "customMetrics",
+        "metrics": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "e1_task_success",
+              "value": "={{ $(\"Compute Scores\").first().json.e1_task_success }}",
+              "type": "number"
+            },
+            {
+              "id": "e2",
+              "name": "e2_latency_seconds",
+              "value": "={{ $(\"Compute Scores\").first().json.e2_latency_s }}",
+              "type": "number"
+            },
+            {
+              "id": "rt",
+              "name": "m12_routing_accuracy",
+              "value": "={{ $(\"Compute Scores\").first().json.routing_accuracy }}",
+              "type": "number"
+            },
+            {
+              "id": "avg",
+              "name": "metric_avg",
+              "value": "={{ $(\"Compute Scores\").first().json.metric_avg }}",
+              "type": "number"
+            },
+            {
+              "id": "hf",
+              "name": "hallucination_free",
+              "value": "={{ $(\"Compute Scores\").first().json.hallucination_free }}",
+              "type": "number"
+            },
+            {
+              "id": "cost",
+              "name": "e3_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.total_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "a1",
+              "name": "a1_extractor_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a1_score }}",
+              "type": "number"
+            },
+            {
+              "id": "a4",
+              "name": "a4_gap_analyzer_score",
+              "value": "={{ $(\"Compute Scores\").first().json.a4_score }}",
+              "type": "number"
+            },
+            {
+              "id": "c1",
+              "name": "a1_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a1_cost_usd ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "c4",
+              "name": "a4_cost_usd",
+              "value": "={{ $(\"Compute Scores\").first().json.a4_cost_usd ?? 0 }}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "8edc8c02-14c2-4c3d-913d-1f6065d7ce8b",
+      "name": "Set Metrics (short-circuit)",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        2336,
+        -2816
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "83a9f33b-b04e-45a2-966c-bea524c2d552",
+      "name": "Reply: Insufficient Input",
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        2848,
+        -2704
+      ],
+      "webhookId": "5838d961-4b8f-4743-82b1-d9bdd2ad0544"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ci",
+              "name": "chatInput",
+              "value": "={{ $json.input_text }}",
+              "type": "string"
+            },
+            {
+              "id": "st",
+              "name": "eval_started_at",
+              "value": "={{ $now.toMillis() }}",
+              "type": "number"
+            },
+            {
+              "id": "rid",
+              "name": "run_id",
+              "value": "=run-{{ $now.toFormat(\"yyyy-MM-dd\") }}",
+              "type": "string"
+            },
+            {
+              "id": "pv",
+              "name": "prompt_version",
+              "value": "v1",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "a2248e42-e7a9-446e-9daa-9ff1ded3a9a2",
+      "name": "Eval Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -1904,
+        -2240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "72470c02-a4c2-44e6-8d95-9f45bb8cb33d",
+      "name": "Join Gap and Scope",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        736,
+        -2000
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1VQCYJWwTBv5XJpPaYbYU0BXJx6K_Bn61",
+          "mode": "list",
+          "cachedResultName": "PRDGen",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1VQCYJWwTBv5XJpPaYbYU0BXJx6K_Bn61"
+        },
+        "options": {}
+      },
+      "id": "7b0036c9-2fb8-4297-b100-18c6d36b404d",
+      "name": "Upload PRD to Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2000,
+        -3200
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "obKcFISCSmEoSADs",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "id": "fd54b161-5e19-4173-a3ac-e5237542b6cf",
+      "name": "Join Saved Outputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2224,
+        -3024
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1GzigIhgV1K2vsPiEq5c5B7BewxPfNsLnQ28MmaKL4Cw",
+          "mode": "list",
+          "cachedResultName": "Epic",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1GzigIhgV1K2vsPiEq5c5B7BewxPfNsLnQ28MmaKL4Cw/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1GzigIhgV1K2vsPiEq5c5B7BewxPfNsLnQ28MmaKL4Cw/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Issue Type",
+              "displayName": "Issue Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Epic Name",
+              "displayName": "Epic Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Priority",
+              "displayName": "Priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Assignee",
+              "displayName": "Assignee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Reporter",
+              "displayName": "Reporter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Labels",
+              "displayName": "Labels",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Component",
+              "displayName": "Component",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Fix Version",
+              "displayName": "Fix Version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8092ed89-b16f-48bf-81d9-60af2a6ba9b0",
+      "name": "Append Epics Upload",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2000,
+        -3008
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "J39QXLCqUVR8bTW5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1TNW51wpd6dJHWLD1cmsMDl2LGQ_Y90hd5Y36s6GVwFU",
+          "mode": "list",
+          "cachedResultName": "story",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TNW51wpd6dJHWLD1cmsMDl2LGQ_Y90hd5Y36s6GVwFU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TNW51wpd6dJHWLD1cmsMDl2LGQ_Y90hd5Y36s6GVwFU/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Story ID",
+              "displayName": "Story ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Issue Type",
+              "displayName": "Issue Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Epic Name",
+              "displayName": "Epic Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Epic Link",
+              "displayName": "Epic Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Summary/Feature",
+              "displayName": "Summary/Feature",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Acceptance Criteria",
+              "displayName": "Acceptance Criteria",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Priority",
+              "displayName": "Priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Assignee",
+              "displayName": "Assignee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Reporter",
+              "displayName": "Reporter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Labels",
+              "displayName": "Labels",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Component",
+              "displayName": "Component",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Fix Version",
+              "displayName": "Fix Version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Sprint",
+              "displayName": "Sprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Story Points",
+              "displayName": "Story Points",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Parent / Depends On",
+              "displayName": "Parent / Depends On",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "37738799-9c10-4324-b7d2-0bc37ede4fc8",
+      "name": "Append Stories Upload",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2000,
+        -2816
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "J39QXLCqUVR8bTW5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "checkIfEvaluating"
+      },
+      "id": "9758799e-5def-4631-a9d4-936f1d506aab",
+      "name": "Eval Run? Skip Gate 2",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.8,
+      "position": [
+        960,
+        -1808
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseJson(raw){ var t=(raw||'').toString().replace(/^\\s*```(?:json)?\\s*/i,'').replace(/```\\s*$/,'').trim(); return JSON.parse(t); }\nconst st = $('Parse Stories').first().json;\nlet gaps = {}; let est = { estimates: [] };\ntry { gaps = parseJson($('A4 Gap Analyzer (full)').first().json.output); } catch (e) { gaps = {}; }\ntry { est = parseJson($('A5 Scope Estimator').first().json.output); } catch (e) { est = { estimates: [] }; }\nconst estMap = {};\n(est.estimates || []).forEach(function(e){ estMap[e.story_id] = e; });\nconst L = [];\nL.push('GATE 2 - PRD and stories approval');\nL.push('');\nconst prd = st.prd;\nconst ov = prd['Product Overview'];\nL.push('PRD draft: ' + (ov && ov.product_name ? ov.product_name : 'Untitled') + ' (Status: Draft)');\nL.push('Template compliance: ' + (st.compliance.ok ? 'all 10 sections OK' : 'ISSUES - missing: ' + (st.compliance.missing_sections || []).join(', ') + '; rows without Source: ' + (st.compliance.rows_without_source || []).join(', ')));\nconst fr = prd['Feature Requirements'] || {};\n(fr.functional || []).forEach(function(r){ L.push('- ' + (r.id || '') + ' [' + (r.priority || '') + '] ' + r.requirement + ' (src ' + r.source + ')'); });\n(fr.non_functional || []).forEach(function(r){ L.push('- ' + (r.id || '') + ' [' + (r.priority || '') + '] ' + r.requirement + ' (src ' + r.source + ')'); });\nL.push('');\nL.push('Epics: ' + st.epics.map(function(e){ return e.name; }).join('; '));\nL.push('Stories (' + st.stories.length + '):');\nst.stories.forEach(function(s){ const e = estMap[s.story_id] || {}; L.push('- ' + s.story_id + ' [' + s.priority + '] ' + s.story + ' | size ' + (e.size || '?') + (e.underspecified ? ' (underspecified: ' + (e.missing_detail || '') + ')' : '')); });\nif ((gaps.gaps || []).length) { L.push(''); L.push('Gap Analyzer questions:'); gaps.gaps.forEach(function(g){ L.push('- ' + g.question + (g.addressed_to ? ' -> ' + g.addressed_to : '')); }); }\nL.push('');\nL.push('Reply \"approve\" to save the PRD to Google Drive and stories to Google Sheets, or reply with comments to reject.');\nreturn [{ json: { gate2_message: L.join('\\n'), estimates: estMap, gaps: gaps } }];"
+      },
+      "id": "3ff4c584-0648-4f08-a6af-c82d53f490cf",
+      "name": "Assemble Review Package",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        -3232
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "message": "={{ $json.gate2_message }}",
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "resumeAmount": 24
+            }
+          }
+        }
+      },
+      "id": "f396954a-d014-4d64-ac70-eeae7adc84cd",
+      "name": "Gate 2: PRD and Stories Approval",
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        -688,
+        -3232
+      ],
+      "webhookId": "08d59ad0-d4fa-4224-a97c-7357970cbe6d"
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json || {};\nlet reply = '';\nif (j.data && typeof j.data === 'object' && j.data.text !== undefined) reply = String(j.data.text);\nelse if (j.text !== undefined) reply = String(j.text);\nelse if (j.chatInput !== undefined) reply = String(j.chatInput);\nelse reply = JSON.stringify(j);\nconst approved = /^\\s*(approve|approved|yes|ok|lgtm)\\b/i.test(reply);\nreturn [{ json: { approved: approved, comments: approved ? '' : reply } }];"
+      },
+      "id": "ba5d6f58-fe89-4e1c-a1e8-64e7ab563e19",
+      "name": "Apply Gate 2 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        -3232
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ap",
+              "leftValue": "={{ $json.approved }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "431f3441-19c0-471e-889f-073e51602bda",
+      "name": "Gate 2 Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1552,
+        -2912
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const st = $('Parse Stories').first().json;\nconst prd = st.prd;\nconst esc = function(s){ return String(s === undefined || s === null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };\nfunction render(v){\n  if (Array.isArray(v)) return '<ul>' + v.map(function(x){ return '<li>' + (typeof x === 'object' ? render(x) : esc(x)) + '</li>'; }).join('') + '</ul>';\n  if (v && typeof v === 'object') return '<table border=\"1\" cellpadding=\"4\">' + Object.keys(v).map(function(k){ return '<tr><th>' + esc(k) + '</th><td>' + (typeof v[k] === 'object' ? render(v[k]) : esc(v[k])) + '</td></tr>'; }).join('') + '</table>';\n  return '<p>' + esc(v) + '</p>';\n}\nfunction table(rows){ if (!rows || !rows.length) return '<p>None</p>'; return '<table border=\"1\" cellpadding=\"4\"><tr><th>ID</th><th>Requirement</th><th>Priority</th><th>Source</th></tr>' + rows.map(function(r){ return '<tr><td>' + esc(r.id) + '</td><td>' + esc(r.requirement) + '</td><td>' + esc(r.priority) + '</td><td>' + esc(r.source) + '</td></tr>'; }).join('') + '</table>'; }\nconst ORDER = ['Product Overview','Goals and Objectives','User Personas','Feature Requirements','Acceptance Criteria','Out of Scope','Dependencies','Assumptions','Open Questions','Timeline'];\nlet html = '<html><body><h1>' + esc((prd['Product Overview'] || {}).product_name || 'PRD') + '</h1>';\nORDER.forEach(function(k, i){\n  html += '<h2>' + (i + 1) + '. ' + esc(k) + '</h2>';\n  if (k === 'Feature Requirements') { const fr = prd[k] || {}; html += '<h3>Functional</h3>' + table(fr.functional) + '<h3>Non-functional</h3>' + table(fr.non_functional); }\n  else html += render(prd[k]);\n});\nhtml += '</body></html>';\nconst product = String((prd['Product Overview'] || {}).product_name || 'Product').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');\nconst date = new Date().toISOString().slice(0, 10);\nconst fileName = 'PRD_' + product + '_' + date + '_v1.html';\nconst binary = await this.helpers.prepareBinaryData(Buffer.from(html, 'utf8'), fileName, 'text/html');\nreturn [{ json: { fileName: fileName }, binary: { data: binary } }];"
+      },
+      "id": "3d90f016-cd19-4fd7-86a6-e23e5555a6d0",
+      "name": "C8 Render PRD for Drive",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        -3200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const st = $('Parse Stories').first().json;\nconst ALLOWED = ['Must Have','Should Have','Nice to Have'];\nconst pr = function(p){ return ALLOWED.indexOf(p) !== -1 ? p : 'Should Have'; };\nconst rows = st.epics.map(function(e){ return { json: { 'Issue Type': 'Epic', 'Epic Name': e.name || '', 'Summary': e.summary || '', 'Description': e.description || '', 'Priority': pr(e.priority), 'Status': 'To Do' } }; });\nreturn rows.length ? rows : [{ json: { 'Issue Type': 'Epic', 'Epic Name': '', 'Summary': '', 'Description': '', 'Priority': '', 'Status': '' } }].slice(0, 0);"
+      },
+      "id": "1064f904-2854-459f-b872-d2662e14d871",
+      "name": "C7 Map Epics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        -2976
+      ]
+    },
+    {
+      "parameters": {
+        "project": {
+          "__rl": true,
+          "value": "10004",
+          "mode": "list",
+          "cachedResultName": "PRD-GEN3"
+        },
+        "issueType": {
+          "__rl": true,
+          "value": "10019",
+          "mode": "list",
+          "cachedResultName": "Epics"
+        },
+        "summary": "={{ $json['Epic Name'] || $json['Summary'] }}",
+        "additionalFields": {
+          "description": "={{ [$json['Summary'], $json['Description']].filter(Boolean).join('\\n\\n') }}",
+          "labels": [
+            "={{ String($json['Priority'] || 'Should Have').trim().replace(/\\s+/g, '-') }}"
+          ]
+        }
+      },
+      "id": "f8289e6c-75e5-411e-8a1c-f3bef62d787c",
+      "name": "Create an issue in Jira Software",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        2256,
+        -2800
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "vpouvl5IcjyFPM5k",
+          "name": "Jira SW Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.self }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const norm = (v) => String(v || '').trim().toLowerCase(); const isDate = (d) => /^\\d{4}-\\d{2}-\\d{2}$/.test(String(d || '').trim()); const name = $('C7 Map Epics').item.json['Epic Name']; const ps = $('Parse Stories').first().json; const epic = (ps.epics || []).find((e) => norm(e.name) === norm(name)) || {}; let due = isDate(epic.due_date) ? String(epic.due_date).trim() : ''; if (!due) { const dates = (ps.stories || []).filter((x) => norm(x.epic) === norm(name) || (ps.epics || []).length === 1).map((x) => String(x.due_date || '').trim()).filter(isDate).sort(); due = dates.length ? dates[dates.length - 1] : ''; } return JSON.stringify({ fields: due ? { duedate: due } : {} }); })() }}",
+        "options": {}
+      },
+      "id": "7b7d8ea0-b72f-4b32-9af0-6279767f77e9",
+      "name": "Set Epic Due Date",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1840,
+        -2304
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "vpouvl5IcjyFPM5k",
+          "name": "Jira SW Cloud account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const st = $('Parse Stories').first().json;\nconst est = $('Assemble Review Package').first().json.estimates || {};\nconst ALLOWED = ['Must Have','Should Have','Nice to Have'];\nconst pr = function(p){ return ALLOWED.indexOf(p) !== -1 ? p : 'Should Have'; };\nconst rows = st.stories.map(function(s){\n  const e = est[s.story_id] || {};\n  const notes = (e.underspecified ? 'UNDERSPECIFIED: ' + (e.missing_detail || '') + '. ' : '') + 'Source reqs: ' + (s.source_req_ids || []).join(', ');\n  return { json: { 'Story ID': s.story_id, 'Issue Type': 'Story', 'Epic Name': s.epic || '', 'Epic Link': s.epic || '', 'Summary/Feature': s.feature || '', 'Description': s.story || '', 'Acceptance Criteria': (s.acceptance_criteria || []).join('\\n'), 'Priority': pr(s.priority), 'Status': 'To Do', 'Story Points': '', 'T shirt Sizing': e.size ? (e.size + (e.underspecified ? ' (provisional)' : '')) : '', 'Parent / Depends On': (s.depends_on || []).join(', '), 'Notes': notes } };\n});\nreturn rows;"
+      },
+      "id": "f754caea-d292-4291-9336-a7b28e11c097",
+      "name": "C7 Map Stories",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        -2800
+      ]
+    },
+    {
+      "parameters": {
+        "project": {
+          "__rl": true,
+          "value": "10004",
+          "mode": "list",
+          "cachedResultName": "PRD-GEN3"
+        },
+        "issueType": {
+          "__rl": true,
+          "value": "10022",
+          "mode": "list",
+          "cachedResultName": "Story"
+        },
+        "summary": "={{ $json['Summary/Feature'] || $json['Description'] }}",
+        "additionalFields": {
+          "description": "={{ [$json['Description'], $json['Acceptance Criteria'] ? 'Acceptance Criteria:\\n' + $json['Acceptance Criteria'] : '', $json['Epic Name'] ? 'Epic: ' + $json['Epic Name'] : '', $json['T shirt Sizing'] ? 'Size: ' + $json['T shirt Sizing'] : '', $json['Notes']].filter(Boolean).join('\\n\\n') }}",
+          "labels": [
+            "={{ String($json['Priority'] || 'Should Have').trim().replace(/\\s+/g, '-') }}"
+          ]
+        }
+      },
+      "id": "f45e914c-0abc-4914-adc7-9798b58b75f8",
+      "name": "Create Jira Stories",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        2304,
+        -2528
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "vpouvl5IcjyFPM5k",
+          "name": "Jira SW Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.self }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const norm = (v) => String(v || '').trim().toLowerCase(); const isDate = (d) => /^\\d{4}-\\d{2}-\\d{2}$/.test(String(d || '').trim()); const story = $('C7 Map Stories').item.json; const epics = $('C7 Map Epics').all(); const created = $('Create an issue in Jira Software').all(); let i = epics.findIndex((e) => norm(e.json['Epic Name']) === norm(story['Epic Name'])); if (i < 0 && epics.length === 1) i = 0; const fields = {}; if (i >= 0 && created[i] && created[i].json.key) fields.parent = { key: created[i].json.key }; const size = String(story['T shirt Sizing'] || '').trim().split(/\\s+/)[0].toUpperCase(); if (['S', 'M', 'L', 'XL'].includes(size)) fields.customfield_10067 = { value: size }; const src = ($('Parse Stories').first().json.stories || []).find((x) => x.story_id === story['Story ID']) || {}; const ps = $('Parse Stories').first().json; const epicSrc = (ps.epics || []).find((e) => norm(e.name) === norm(story['Epic Name'])) || ((ps.epics || []).length === 1 ? ps.epics[0] : {}); const due = isDate(src.due_date) ? src.due_date : (isDate(epicSrc.due_date) ? epicSrc.due_date : ''); if (due) fields.duedate = String(due).trim(); return JSON.stringify({ fields }); })() }}",
+        "options": {}
+      },
+      "id": "d8cf9081-78db-4fd5-823a-27e681b9c39a",
+      "name": "Set Story Parent, Size and Due Date",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2528,
+        -2528
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "vpouvl5IcjyFPM5k",
+          "name": "Jira SW Cloud account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "message": "=Nothing was saved to Drive or Sheets. Your comments: {{ $json.comments }}\n\nSend the source again with these comments included to generate a revised PRD.",
+        "options": {}
+      },
+      "id": "ac1d119f-ba92-48e3-abb3-87bdcb3beb5d",
+      "name": "Reply: Rejected",
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        1664,
+        -2608
+      ],
+      "webhookId": "7a7a8084-ce66-4f1b-9a46-2967462985bd"
+    },
+    {
+      "parameters": {
+        "message": "=Approved and saved. PRD: {{ $(\"Upload PRD to Drive\").first().json.webViewLink }}\nEpics and stories were appended to the Epics Upload and Stories Upload tabs.",
+        "options": {}
+      },
+      "id": "fc235e35-ddb2-4323-865b-8358df4e3edf",
+      "name": "Reply: Saved",
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        2448,
+        -3008
+      ],
+      "executeOnce": true,
+      "webhookId": "20c0c7bf-38ed-4711-90fb-12aa74745c15"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "PM Chat (file upload)": {
+      "main": [
+        [
+          {
+            "node": "C1 Ingest and Normalise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C1 Ingest and Normalise": {
+      "main": [
+        [
+          {
+            "node": "C2 Input Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C2 Input Router": {
+      "main": [
+        [
+          {
+            "node": "A1 Requirement Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A1 Requirement Extractor": {
+      "main": [
+        [
+          {
+            "node": "C4 Verify and Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A1 Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "A1 Requirement Extractor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C4 Verify and Validate": {
+      "main": [
+        [
+          {
+            "node": "C3 Sufficiency Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C3 Sufficiency Gate": {
+      "main": [
+        [
+          {
+            "node": "Eval Run? Skip Gate 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A4 Gap Analyzer (short-circuit)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eval Run? Skip Gate 1": {
+      "main": [
+        [
+          {
+            "node": "Auto-Approve Gate 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gate 1: Requirements Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A4 Gap Analyzer (short-circuit)": {
+      "main": [
+        [
+          {
+            "node": "Format Insufficient Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A4 Short Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "A4 Gap Analyzer (short-circuit)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Insufficient Reply": {
+      "main": [
+        [
+          {
+            "node": "Eval Run? Skip Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eval Run? Skip Reply": {
+      "main": [
+        [
+          {
+            "node": "Collect Pipeline Outputs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply: Insufficient Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Approve Gate 1": {
+      "main": [
+        [
+          {
+            "node": "Apply Gate 1 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Gate 1 Decision": {
+      "main": [
+        [
+          {
+            "node": "A2 PRD Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A2 PRD Generator": {
+      "main": [
+        [
+          {
+            "node": "C6 Template Compliance Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A2 Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "A2 PRD Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a document in Google Docs": {
+      "ai_tool": [
+        [
+          {
+            "node": "A2 PRD Generator",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C6 Template Compliance Check": {
+      "main": [
+        [
+          {
+            "node": "A3 Story Breakdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A3 Story Breakdown": {
+      "main": [
+        [
+          {
+            "node": "Parse Stories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A3 Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "A3 Story Breakdown",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Stories": {
+      "main": [
+        [
+          {
+            "node": "A4 Gap Analyzer (full)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "A5 Scope Estimator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A4 Gap Analyzer (full)": {
+      "main": [
+        [
+          {
+            "node": "Join Gap and Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A4 Full Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "A4 Gap Analyzer (full)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A5 Scope Estimator": {
+      "main": [
+        [
+          {
+            "node": "Join Gap and Scope",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Gate 1: Requirements Review": {
+      "main": [
+        [
+          {
+            "node": "Apply Gate 1 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Pipeline Outputs": {
+      "main": [
+        [
+          {
+            "node": "Build Judge Prompts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Judge Prompts": {
+      "main": [
+        [
+          {
+            "node": "LLM Judge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Judge": {
+      "main": [
+        [
+          {
+            "node": "Get Execution Usage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Judge Model (gpt-4o)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "LLM Judge",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Execution Usage": {
+      "main": [
+        [
+          {
+            "node": "Compute Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Scores": {
+      "main": [
+        [
+          {
+            "node": "Log Run Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Run Results": {
+      "main": [
+        [
+          {
+            "node": "Send Trace to Langfuse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Trace to Langfuse": {
+      "main": [
+        [
+          {
+            "node": "Prepare Score Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Score Requests": {
+      "main": [
+        [
+          {
+            "node": "Split Score Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Score Requests": {
+      "main": [
+        [
+          {
+            "node": "Send Scores to Langfuse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Scores to Langfuse": {
+      "main": [
+        [
+          {
+            "node": "Record Eval Outputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Eval Outputs": {
+      "main": [
+        [
+          {
+            "node": "Reached Full Pipeline?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reached Full Pipeline?": {
+      "main": [
+        [
+          {
+            "node": "Set Metrics (full pipeline)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Metrics (short-circuit)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eval Input": {
+      "main": [
+        [
+          {
+            "node": "C1 Ingest and Normalise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Join Gap and Scope": {
+      "main": [
+        [
+          {
+            "node": "Eval Run? Skip Gate 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PRD to Drive": {
+      "main": [
+        [
+          {
+            "node": "Join Saved Outputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Join Saved Outputs": {
+      "main": [
+        [
+          {
+            "node": "Reply: Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Epics Upload": {
+      "main": [
+        [
+          {
+            "node": "Join Saved Outputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Append Stories Upload": {
+      "main": [
+        [
+          {
+            "node": "Join Saved Outputs",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Eval Run? Skip Gate 2": {
+      "main": [
+        [
+          {
+            "node": "Collect Pipeline Outputs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assemble Review Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Review Package": {
+      "main": [
+        [
+          {
+            "node": "Gate 2: PRD and Stories Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate 2: PRD and Stories Approval": {
+      "main": [
+        [
+          {
+            "node": "Apply Gate 2 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Gate 2 Decision": {
+      "main": [
+        [
+          {
+            "node": "Gate 2 Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate 2 Approved?": {
+      "main": [
+        [
+          {
+            "node": "C8 Render PRD for Drive",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "C7 Map Epics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply: Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C8 Render PRD for Drive": {
+      "main": [
+        [
+          {
+            "node": "Upload PRD to Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C7 Map Epics": {
+      "main": [
+        [
+          {
+            "node": "Append Epics Upload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create an issue in Jira Software",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an issue in Jira Software": {
+      "main": [
+        [
+          {
+            "node": "Set Epic Due Date",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "C7 Map Stories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C7 Map Stories": {
+      "main": [
+        [
+          {
+            "node": "Append Stories Upload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Jira Stories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira Stories": {
+      "main": [
+        [
+          {
+            "node": "Set Story Parent, Size and Due Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "saveExecutionProgress": true
+  },
+  "versionId": "e0b295e2-a704-4d27-865c-4b757a1f9c34",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3a62c45bc5193c0f05ef5ab0e1ee5474af8547cbe605a34985ad79e930c4dd3b"
+  },
+  "nodeGroups": [
+    {
+      "id": "f07ca485-4b94-4124-9cdc-73912ba4262f",
+      "name": "Prepare input",
+      "nodeIds": [
+        "f8f79026-949f-4f9b-9e27-a073ce45b07a",
+        "6f5a9284-9a1c-4959-91f5-25ff274c7b35",
+        "8aefb4c8-f1ff-4360-8c4b-abe0e8cd7ef0",
+        "9029b06e-f638-4dcb-97d2-fa94bf9d3a0e",
+        "b82774f7-e0de-444a-b968-7493c0452849",
+        "00d67a67-ec30-4b20-9975-296a7598a182"
+      ],
+      "description": "Reads text and files, extracts requirements, verifies quotes, and checks whether enough was stated to draft a PRD"
+    },
+    {
+      "id": "5c5d3e3b-ba0e-449b-9def-ab2a2c0cb730",
+      "name": "Ask for missing input",
+      "nodeIds": [
+        "58446a46-b985-434c-a539-f43528755e03",
+        "ce9bcb1a-2535-4166-9f82-cacc3c469f37",
+        "6e9de296-d022-49ba-83f3-a9cd34e56d0b",
+        "dd2a3172-d5a1-44c4-9615-b0992963463f"
+      ],
+      "description": "When too little is stated, no PRD is drafted; replies in chat with specific missing information and questions"
+    },
+    {
+      "id": "f15b01c9-2615-476f-be43-34a5e4f02d82",
+      "name": "Draft PRD and stories",
+      "nodeIds": [
+        "95abb5bd-36ab-4e7c-8833-4d85c666debf",
+        "cdec0030-5909-4fb6-bb8f-7e95060ecb7e",
+        "5fa629fc-4e64-47d1-9490-bcddc73491e0",
+        "924f2534-7762-420b-8937-bc30ae3150bf",
+        "531b191b-dfb3-451b-8e62-90a19c71a7ed",
+        "fe645d82-7825-4d73-a214-813a94e0ba82",
+        "d2ab6374-f263-452a-ba61-b98c61b2a66d",
+        "5d94f7a0-b79b-47d7-8377-1827f9679665",
+        "74cd6816-693f-4184-a92d-98e4a3d738c7",
+        "f2c11b2f-53f2-4e58-8efb-42f2d583b17f",
+        "5a81370d-8998-4d53-bac0-de69dad8c7c1",
+        "c61d9478-72e4-4d27-bb9b-8c49d0b06eec",
+        "e4de3d7d-a435-4441-b499-ddafec6bb03f",
+        "72470c02-a4c2-44e6-8d95-9f45bb8cb33d",
+        "9758799e-5def-4631-a9d4-936f1d506aab",
+        "8c02cd60-bed0-4da0-9af8-4855f1e46abd"
+      ],
+      "description": "PM approves requirements (auto-approved in evals), then PRD and stories are drafted with gap questions and size estimates"
+    },
+    {
+      "id": "93e984b6-3948-44cd-80e2-47d4dddc0e18",
+      "name": "Evaluate every agent",
+      "nodeIds": [
+        "8733a278-dd37-4c09-a157-8b345a939ca7",
+        "7f68362d-4031-41aa-b28c-0a32d300124a",
+        "dc84a475-4eed-4278-ba22-840ed4474cc0",
+        "576bedc8-9199-49e2-a4b7-e0ced54ccb4e",
+        "50e4f09c-aa93-4262-bb1c-4f9c6faad240",
+        "ffeb6e37-c5b9-42aa-97eb-076d220a6a99",
+        "efdfec4f-c830-49bb-b20e-5593f92ab3c5",
+        "bba8a3f4-de8b-40f6-8a6b-e6f6d020d3f7",
+        "d9e6e642-77da-4c84-9b77-fa97ae86275d",
+        "51167fb0-3418-43cd-a5a4-550bea641671",
+        "612b9cdc-286a-404a-9ef5-98165022a4b0",
+        "009eafea-b6ce-4b6c-be74-555c13406108",
+        "ec939061-67a8-4813-abc5-42f56c5d9fab",
+        "ddd0f49c-ff2f-4dbe-b2d6-9d580d735448",
+        "8edc8c02-14c2-4c3d-913d-1f6065d7ce8b"
+      ],
+      "description": "Eval runs only: judges A1-A5 against ground truth (M1-M9), adds routing, pass/fail, latency, cost; logs to runs table and Langfuse"
+    },
+    {
+      "id": "db8d48fc-31c4-497f-85c7-c7a1b45ad320",
+      "name": "Review PRD with PM",
+      "nodeIds": [
+        "3ff4c584-0648-4f08-a6af-c82d53f490cf",
+        "f396954a-d014-4d64-ac70-eeae7adc84cd",
+        "ba5d6f58-fe89-4e1c-a1e8-64e7ab563e19"
+      ],
+      "description": "Sends the drafted PRD, stories, gaps and sizes to the PM in chat and waits up to 24h for approve or change comments"
+    },
+    {
+      "id": "94306f11-b951-45f2-9ecd-bde2e63f2ddb",
+      "name": "Publish approved outputs",
+      "nodeIds": [
+        "431f3441-19c0-471e-889f-073e51602bda",
+        "3d90f016-cd19-4fd7-86a6-e23e5555a6d0",
+        "7b0036c9-2fb8-4297-b100-18c6d36b404d",
+        "1064f904-2854-459f-b872-d2662e14d871",
+        "8092ed89-b16f-48bf-81d9-60af2a6ba9b0",
+        "f8289e6c-75e5-411e-8a1c-f3bef62d787c",
+        "f754caea-d292-4291-9336-a7b28e11c097",
+        "37738799-9c10-4324-b7d2-0bc37ede4fc8",
+        "f45e914c-0abc-4914-adc7-9798b58b75f8",
+        "d8cf9081-78db-4fd5-823a-27e681b9c39a",
+        "7b7d8ea0-b72f-4b32-9af0-6279767f77e9",
+        "fd54b161-5e19-4173-a3ac-e5237542b6cf",
+        "fc235e35-ddb2-4323-865b-8358df4e3edf",
+        "ac1d119f-ba92-48e3-abb3-87bdcb3beb5d"
+      ],
+      "description": "After the PM decision: saves PRD to Drive, logs epics/stories to Sheets, creates them in Jira, and replies in chat"
+    }
+  ],
+  "id": "oopUx56MXcK1WulN",
+  "tags": []
+}
